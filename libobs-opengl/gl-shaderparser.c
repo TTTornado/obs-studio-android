@@ -83,7 +83,15 @@ static bool gl_write_type_n(struct gl_shader_parser *glsp, const char *type, siz
 	else if (cmp_type(type, len, "texture_cube", 12) == 0)
 		dstr_cat(&glsp->gl_string, "samplerCube");
 	else if (cmp_type(type, len, "texture_rect", 12) == 0)
+#if defined(__ANDROID__)
+		/* ES 没有矩形纹理：GL_TEXTURE_RECTANGLE 已被置 0，矩形纹理创建必失败，
+		 * gs_texture_is_rect() 也恒为 false，这条路径在 Android 上不可达。但
+		 * obs_init_graphics 在 GS_DEVICE_OPENGL 下要求 default_rect.effect 必须
+		 * 编译成功，所以这里按普通 2D 采样发出去，只为过初始化那道门。 */
+		dstr_cat(&glsp->gl_string, "sampler2D");
+#else
 		dstr_cat(&glsp->gl_string, "sampler2DRect");
+#endif
 	else
 		return false;
 
@@ -229,8 +237,10 @@ static void gl_write_struct(struct gl_shader_parser *glsp, struct shader_struct 
 static void gl_write_interface_block(struct gl_shader_parser *glsp)
 {
 	if (glsp->type == GS_SHADER_VERTEX) {
+#if !defined(__ANDROID__)
 		dstr_cat(&glsp->gl_string, "out gl_PerVertex {\n"
 					   "\tvec4 gl_Position;\n};\n\n");
+#endif
 	}
 }
 
@@ -727,6 +737,29 @@ static bool gl_shader_buildstring(struct gl_shader_parser *glsp)
 		return false;
 	}
 
+#if defined(__ANDROID__)
+	dstr_copy(&glsp->gl_string, "#version 310 es\n\n");
+	/* ES 的 fragment shader 没有默认精度，缺这段会直接编译失败。sampler 也要显式
+	 * 声明：默认精度偏低，而 format_conversion/area 这类 effect 靠逐 texel Load
+	 * 取 10bit、UV 数据，精度不足会引入可见误差。 */
+	dstr_cat(&glsp->gl_string, "precision highp float;\n"
+				   "precision highp int;\n"
+				   "precision highp sampler2D;\n"
+				   "precision highp samplerCube;\n\n");
+	dstr_cat(&glsp->gl_string, "const bool obs_glsl_compile = true;\n\n");
+	/* ES 无 GL_CLAMP_TO_BORDER（见 gl-subsystem.h 降级为 CLAMP_TO_EDGE），越界会取到
+	 * 边缘像素而不是透明黑，这里用边界判定补回来。另外 ES 禁止 ivec2→vec2、int→float
+	 * 的隐式转换，写法必须逐处显式化。 */
+	dstr_cat(&glsp->gl_string, "vec4 obs_load_2d(sampler2D s, ivec3 p_lod)\n");
+	dstr_cat(&glsp->gl_string, "{\n");
+	dstr_cat(&glsp->gl_string, "\tint lod = p_lod.z;\n");
+	dstr_cat(&glsp->gl_string, "\tivec2 size = textureSize(s, lod);\n");
+	dstr_cat(&glsp->gl_string, "\tif (any(lessThan(p_lod.xy, ivec2(0))) || any(greaterThanEqual(p_lod.xy, size)))\n");
+	dstr_cat(&glsp->gl_string, "\t\treturn vec4(0.0);\n");
+	dstr_cat(&glsp->gl_string, "\tvec2 p = (vec2(p_lod.xy) + 0.5) / vec2(size);\n");
+	dstr_cat(&glsp->gl_string, "\treturn textureLod(s, p, float(lod));\n");
+	dstr_cat(&glsp->gl_string, "}\n\n");
+#else
 	dstr_copy(&glsp->gl_string, "#version 330\n\n");
 	dstr_cat(&glsp->gl_string, "const bool obs_glsl_compile = true;\n\n");
 	dstr_cat(&glsp->gl_string, "vec4 obs_load_2d(sampler2D s, ivec3 p_lod)\n");
@@ -745,6 +778,7 @@ static bool gl_shader_buildstring(struct gl_shader_parser *glsp)
 	dstr_cat(&glsp->gl_string, "\tvec4 color = textureLod(s, p, lod);\n");
 	dstr_cat(&glsp->gl_string, "\treturn color;\n");
 	dstr_cat(&glsp->gl_string, "}\n\n");
+#endif
 	gl_write_params(glsp);
 	gl_write_inputs(glsp, main_func);
 	gl_write_outputs(glsp, main_func);

@@ -121,6 +121,10 @@ gs_texture_t *device_voltexture_create(gs_device_t *device, uint32_t width, uint
 	tex->base.type = GS_TEXTURE_3D;
 	tex->base.format = color_format;
 	tex->base.levels = levels;
+	/* 故意不用 convert_gs_upload_format：gl_init_volume 没有换序参数，而 3D 纹理唯一的调用者
+	 * （obs-filters/color-grade-filter）只请求 GS_RGBA 与 GS_RGBA16F。真出现 BGRA 音量纹理时，
+	 * format=GL_BGRA_EXT 配 sized internal format 会被 GLES 驱动直接拒成 INVALID_OPERATION，
+	 * 也就是显式失败而不是静默错色。 */
 	tex->base.gl_format = convert_gs_format(color_format);
 	tex->base.gl_internal_format = convert_gs_internal_format(color_format);
 	tex->base.gl_type = get_gl_format_type(color_format);

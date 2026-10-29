@@ -51,6 +51,8 @@ gs_stagesurf_t *device_stagesurface_create(gs_device_t *device, uint32_t width, 
 	surf->format = color_format;
 	surf->width = width;
 	surf->height = height;
+	/* 只给 glReadPixels 用（见本文件 device_stage_texture），所以这里刻意与上传侧不对称：
+	 * 上传走 convert_gs_upload_format，回读保持 GL_BGRA_EXT 且不需要换序。理由见 gl-subsystem.h。 */
 	surf->gl_format = convert_gs_format(color_format);
 	surf->gl_internal_format = convert_gs_internal_format(color_format);
 	surf->gl_type = get_gl_format_type(color_format);
@@ -106,10 +108,13 @@ static bool can_stage(struct gs_stage_surface *dst, struct gs_texture_2d *src)
 	return true;
 }
 
-#ifdef __APPLE__
+#if defined(__APPLE__) || defined(__ANDROID__)
 
 /* Apparently for mac, PBOs won't do an asynchronous transfer unless you use
- * FBOs along with glReadPixels, which is really dumb. */
+ * FBOs along with glReadPixels, which is really dumb.
+ *
+ * Android/GLES 走同一条路，而且没得选：ES 压根没有 glGetTexImage，下面的 #else 分支
+ * 在 ES 上连编译都过不了。FBO + glReadPixels 到绑定的 PBO 正是 ES 的标准回读姿势。 */
 void device_stage_texture(gs_device_t *device, gs_stagesurf_t *dst, gs_texture_t *src)
 {
 	struct gs_texture_2d *tex2d = (struct gs_texture_2d *)src;
@@ -204,7 +209,7 @@ bool gs_stagesurface_map(gs_stagesurf_t *stagesurf, uint8_t **data, uint32_t *li
 	if (!gl_bind_buffer(GL_PIXEL_PACK_BUFFER, stagesurf->pack_buffer))
 		goto fail;
 
-	*data = glMapBuffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY);
+	*data = gl_map_buffer(GL_PIXEL_PACK_BUFFER, GL_READ_ONLY);
 	if (!gl_success("glMapBuffer"))
 		goto fail;
 

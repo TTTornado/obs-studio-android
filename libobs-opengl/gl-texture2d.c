@@ -32,7 +32,8 @@ static bool upload_texture_2d(struct gs_texture_2d *tex, const uint8_t **data)
 		return false;
 
 	success = gl_init_face(GL_TEXTURE_2D, tex->base.gl_type, num_levels, tex->base.gl_format,
-			       tex->base.gl_internal_format, compressed, tex->width, tex->height, tex_size, &data);
+			       tex->base.gl_internal_format, compressed, tex->width, tex->height, tex_size, &data,
+			       gs_format_needs_rb_swap(tex->base.format));
 
 	if (!gl_tex_param_i(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, num_levels - 1))
 		success = false;
@@ -82,7 +83,7 @@ gs_texture_t *device_texture_create(gs_device_t *device, uint32_t width, uint32_
 	tex->base.type = GS_TEXTURE_2D;
 	tex->base.format = color_format;
 	tex->base.levels = levels;
-	tex->base.gl_format = convert_gs_format(color_format);
+	tex->base.gl_format = convert_gs_upload_format(color_format);
 	tex->base.gl_internal_format = convert_gs_internal_format(color_format);
 	tex->base.gl_type = get_gl_format_type(color_format);
 	tex->base.gl_target = GL_TEXTURE_2D;
@@ -195,7 +196,7 @@ bool gs_texture_map(gs_texture_t *tex, uint8_t **ptr, uint32_t *linesize)
 	if (!gl_bind_buffer(GL_PIXEL_UNPACK_BUFFER, tex2d->unpack_buffer))
 		goto fail;
 
-	*ptr = glMapBuffer(GL_PIXEL_UNPACK_BUFFER, GL_WRITE_ONLY);
+	*ptr = gl_map_buffer(GL_PIXEL_UNPACK_BUFFER, GL_WRITE_ONLY);
 	if (!gl_success("glMapBuffer"))
 		goto fail;
 
@@ -225,6 +226,30 @@ void gs_texture_unmap(gs_texture_t *tex)
 
 	if (!gl_bind_texture(GL_TEXTURE_2D, tex2d->base.texture))
 		goto failed;
+
+#if defined(__ANDROID__)
+	/* 上面那次 glUnmapBuffer 之后数据已在 buffer 对象里；BGRA 系的外部格式换成了
+	 * GL_RGBA（见 gl-subsystem.h 的 convert_gs_upload_format），所以这里要原地把
+	 * 已经写进 unpack buffer 的字节换序，否则 R/B 会反。这条路径不经过 gl_init_face，
+	 * 换序必须单独补一次。 */
+	if (gs_format_needs_rb_swap(tex->format)) {
+		uint8_t *px = gl_map_buffer(GL_PIXEL_UNPACK_BUFFER, GL_READ_WRITE);
+		GLint buf_size = 0;
+
+		if (!px || !gl_success("glMapBuffer"))
+			goto failed;
+
+		glGetBufferParameteriv(GL_PIXEL_UNPACK_BUFFER, GL_BUFFER_SIZE, &buf_size);
+		if (buf_size <= 0)
+			goto failed;
+
+		gl_swap_rb_bgra(px, px, (size_t)buf_size / 4);
+
+		glUnmapBuffer(GL_PIXEL_UNPACK_BUFFER);
+		if (!gl_success("glUnmapBuffer"))
+			goto failed;
+	}
+#endif
 
 	glTexImage2D(GL_TEXTURE_2D, 0, tex->gl_internal_format, tex2d->width, tex2d->height, 0, tex->gl_format,
 		     tex->gl_type, 0);

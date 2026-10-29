@@ -37,7 +37,8 @@ static inline bool upload_texture_cube(struct gs_texture_cube *tex, const uint8_
 			success = false;
 
 		if (!gl_init_face(target, gl_type, num_levels, tex->base.gl_format, tex->base.gl_internal_format,
-				  compressed, tex->size, tex->size, tex_size, &data))
+				  compressed, tex->size, tex->size, tex_size, &data,
+				  gs_format_needs_rb_swap(tex->base.format)))
 			success = false;
 
 		if (!gl_bind_texture(target, 0))
@@ -62,7 +63,7 @@ gs_texture_t *device_cubetexture_create(gs_device_t *device, uint32_t size, enum
 	tex->base.type = GS_TEXTURE_CUBE;
 	tex->base.format = color_format;
 	tex->base.levels = levels;
-	tex->base.gl_format = convert_gs_format(color_format);
+	tex->base.gl_format = convert_gs_upload_format(color_format);
 	tex->base.gl_internal_format = convert_gs_internal_format(color_format);
 	tex->base.gl_target = GL_TEXTURE_CUBE_MAP;
 	tex->base.is_render_target = (flags & GS_RENDER_TARGET) != 0;

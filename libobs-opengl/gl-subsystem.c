@@ -115,11 +115,9 @@ static void APIENTRY gl_debug_proc(GLenum source, GLenum type, GLuint id, GLenum
 
 static void gl_enable_debug()
 {
-	if (GLAD_GL_VERSION_4_3) {
+	if (GLAD_GL_VERSION_4_3 || GLAD_GL_KHR_debug) {
 		glDebugMessageCallback(gl_debug_proc, NULL);
 		gl_enable(GL_DEBUG_OUTPUT);
-	} else if (GLAD_GL_ARB_debug_output) {
-		glDebugMessageCallbackARB(gl_debug_proc, NULL);
 	} else {
 		blog(LOG_DEBUG, "Failed to set GL debug callback as it is "
 				"not supported.");
@@ -144,7 +142,11 @@ static bool gl_init_extensions(struct gs_device *device)
 		return false;
 	}
 
+#ifndef __ANDROID__
+	/* ES 没有这个开关：立方体贴图的棱边过滤是规范里写死的行为，
+	 * 没有可关开的状态，枚举也不在 GLES 头里。 */
 	gl_enable(GL_TEXTURE_CUBE_MAP_SEAMLESS);
+#endif
 
 	if (GLAD_GL_VERSION_4_3 || GLAD_GL_ARB_copy_image)
 		device->copy_type = COPY_TYPE_ARB;
@@ -152,6 +154,13 @@ static bool gl_init_extensions(struct gs_device *device)
 		device->copy_type = COPY_TYPE_NV;
 	else
 		device->copy_type = COPY_TYPE_FBO_BLIT;
+
+#if defined(__ANDROID__)
+	if (!GLAD_GL_EXT_sRGB_write_control)
+		blog(LOG_WARNING,
+		     "GL_EXT_sRGB_write_control 不在位：sRGB 附件的 linear->sRGB 编码无法关闭，"
+		     "gs_enable_framebuffer_srgb(false) 包住的绘制会与桌面不一致（偏亮）");
+#endif
 
 	return true;
 }
@@ -227,6 +236,12 @@ const char *gpu_get_renderer(void)
 // Get the amount of dedicated GDDR memory, aka VRAM, in units of kilobytes.
 uint64_t gpu_get_dmem(void)
 {
+#if defined(__ANDROID__)
+	/* GL_GPU_MEMORY_INFO_*_NVX 是 NVIDIA 桌面专有，GLES 没有可移植的显存查询。
+	 * 返回 0 表示"未知"，调用方（前端 GPU 内存占用显示）需要把 0 当未知处理，
+	 * 不能拿它去做任何容量判断。 */
+	return 0;
+#else
 	GLint dmem = 0;
 	glGetIntegerv(GL_GPU_MEMORY_INFO_DEDICATED_VIDMEM_NVX, &dmem);
 
@@ -238,11 +253,15 @@ uint64_t gpu_get_dmem(void)
 	}
 
 	return (uint64_t)dmem;
+#endif
 }
 
 // Get the amount of CPU memory shared by the GPU, in units of kilobytes.
 uint64_t gpu_get_smem(void)
 {
+#if defined(__ANDROID__)
+	return 0; /* 同上：GLES 无对应查询 */
+#else
 	GLint dmem, total_mem = 0;
 	glGetIntegerv(GL_GPU_MEMORY_INFO_DEDICATED_VIDMEM_NVX, &dmem);
 	glGetIntegerv(GL_GPU_MEMORY_INFO_TOTAL_AVAILABLE_MEMORY_NVX, &total_mem);
@@ -258,6 +277,7 @@ uint64_t gpu_get_smem(void)
 	}
 
 	return (uint64_t)total_mem - dmem;
+#endif
 }
 
 int device_create(gs_device_t **p_device, uint32_t adapter)
@@ -433,6 +453,13 @@ gs_timer_t *device_timer_create(gs_device_t *device)
 {
 	UNUSED_PARAMETER(device);
 
+#if defined(__ANDROID__)
+	/* 时间戳查询不属于 GLES 核心（在 EXT_disjoint_timer_query 里，glad 的 GLES
+	 * 集合没要），所以 glQueryCounter/GL_TIMESTAMP 根本不存在。跟下面的
+	 * device_timer_range_create 一样如实返回 NULL 表示不支持。
+	 * 影响面：libobs/util/source-profiler.c 拿不到源级 GPU 耗时（CPU 耗时仍有效）。 */
+	return NULL;
+#else
 	struct gs_timer *timer;
 
 	GLuint queries[2];
@@ -445,6 +472,7 @@ gs_timer_t *device_timer_create(gs_device_t *device)
 	timer->queries[1] = queries[1];
 
 	return timer;
+#endif
 }
 
 gs_timer_range_t *device_timer_range_create(gs_device_t *device)
@@ -517,11 +545,13 @@ static bool load_texture_sampler(gs_texture_t *tex, gs_samplerstate_t *ss)
 		success = false;
 	if (!gl_tex_param_i(tex->gl_target, GL_TEXTURE_WRAP_R, ss->address_w))
 		success = false;
+#if OBS_GL_HAS_BORDER_CLAMP
 	if (ss->address_u == GL_CLAMP_TO_BORDER || ss->address_v == GL_CLAMP_TO_BORDER ||
 	    ss->address_w == GL_CLAMP_TO_BORDER) {
 		if (!gl_tex_param_fv(tex->gl_target, GL_TEXTURE_BORDER_COLOR, ss->border_color.ptr))
 			success = false;
 	}
+#endif
 	if (GLAD_GL_EXT_texture_filter_anisotropic) {
 		if (!gl_tex_param_i(tex->gl_target, GL_TEXTURE_MAX_ANISOTROPY_EXT, ss->max_anisotropy))
 			success = false;
@@ -942,7 +972,17 @@ fail:
 
 void device_enable_framebuffer_srgb(gs_device_t *device, bool enable)
 {
+#if defined(__ANDROID__)
+	/* GL_EXT_sRGB_write_control 补的就是桌面那个同名状态，在位就走和桌面一模一样的路。
+	 * 缺失的设备退化成"只记账"：附件是 sRGB internal format 时编码关不掉，
+	 * 见 struct gs_device 里 framebuffer_srgb_enabled 的注释。 */
+	if (!GLAD_GL_EXT_sRGB_write_control) {
+		device->framebuffer_srgb_enabled = enable;
+		return;
+	}
+#else
 	UNUSED_PARAMETER(device);
+#endif
 
 	if (enable)
 		gl_enable(GL_FRAMEBUFFER_SRGB);
@@ -952,7 +992,12 @@ void device_enable_framebuffer_srgb(gs_device_t *device, bool enable)
 
 bool device_framebuffer_srgb_enabled(gs_device_t *device)
 {
+#if defined(__ANDROID__)
+	if (!GLAD_GL_EXT_sRGB_write_control)
+		return device->framebuffer_srgb_enabled;
+#else
 	UNUSED_PARAMETER(device);
+#endif
 
 	const GLboolean enabled = glIsEnabled(GL_FRAMEBUFFER_SRGB);
 	gl_success("glIsEnabled");
@@ -1516,7 +1561,16 @@ bool device_nv12_available(gs_device_t *device)
 bool device_p010_available(gs_device_t *device)
 {
 	UNUSED_PARAMETER(device);
-#ifdef _WIN32
+#if defined(__ANDROID__)
+	/* 桌面 GL 把 P010 存成分开的 R16 / RG16 纹理，所以除了 Windows 都返回 true。
+	 * ES 3.1 没有 16-bit **unorm** 内部格式（见 gl-subsystem.h 兼容块里被置 0 的
+	 * GL_R16/GL_RG16），继续返回 true 只会在后面分配纹理时炸出 GL_INVALID_VALUE，
+	 * 不如在这里如实说不支持。
+	 * 要支持的话：给 deps/glad-gles 的扩展列表加 EXT_texture_norm16，并把
+	 * GL_R16/GL_RG16/GL_RGBA16 改映射到 GL_R16_EXT/GL_RG16_EXT/GL_RGBA16_EXT
+	 * （get_gl_format_type 那边保持 GL_UNSIGNED_SHORT 不变）。 */
+	return false;
+#elif defined(_WIN32)
 	return false;
 #else
 	return true; // always a split R16,R16G16 texture.
@@ -1577,18 +1631,31 @@ void gs_timer_destroy(gs_timer_t *timer)
 
 void gs_timer_begin(gs_timer_t *timer)
 {
+#if defined(__ANDROID__)
+	UNUSED_PARAMETER(timer); /* device_timer_create 在 ES 上恒返回 NULL */
+#else
 	glQueryCounter(timer->queries[0], GL_TIMESTAMP);
 	gl_success("glQueryCounter");
+#endif
 }
 
 void gs_timer_end(gs_timer_t *timer)
 {
+#if defined(__ANDROID__)
+	UNUSED_PARAMETER(timer);
+#else
 	glQueryCounter(timer->queries[1], GL_TIMESTAMP);
 	gl_success("glQueryCounter");
+#endif
 }
 
 bool gs_timer_get_data(gs_timer_t *timer, uint64_t *ticks)
 {
+#if defined(__ANDROID__)
+	UNUSED_PARAMETER(timer);
+	UNUSED_PARAMETER(ticks);
+	return false; /* 如实报"取不到"，让 source-profiler 跳过这条采样 */
+#else
 	GLint available = 0;
 	glGetQueryObjectiv(timer->queries[1], GL_QUERY_RESULT_AVAILABLE, &available);
 
@@ -1600,6 +1667,7 @@ bool gs_timer_get_data(gs_timer_t *timer, uint64_t *ticks)
 
 	*ticks = end - begin;
 	return true;
+#endif
 }
 
 void gs_timer_range_destroy(gs_timer_range_t *range)
