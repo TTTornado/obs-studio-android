@@ -1,0 +1,160 @@
+name: Android compile check
+
+# 目的：在没有本地环境的情况下，验证 Android 移植的**编译与链接**是否正确。
+#
+# 范围（本 workflow 只做这些）：
+#   * 交叉编译 14 个第三方依赖（deps-android）
+#   * 配置并构建 libobs / libobs-opengl(GLES) / 全部 android-* 采集插件
+#
+# 不做的：
+#   * Qt 前端 —— 用 -DENABLE_FRONTEND=OFF 跳过（见 android/compile-check.sh 的说明）。
+#     Qt 6.9.3 的获取方式待定，前端编译验证另行处理。
+#   * APK 打包 / 签名 —— 那是下一步
+#   * 真机行为 —— 相机、UVC、MediaProjection、AAudio、推流都无法在 CI 验证
+#
+# 磁盘：默认 runner 根分区只有 ~14 GB，而构建需要 20–35 GB（不含 Qt），
+# 因此必须先用 free-disk-space 清理。保留 Android SDK（android: false），
+# 因为下面要用 sdkmanager 装指定版本的 NDK。
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'cmake/android/**'
+      - 'libobs/**'
+      - 'libobs-opengl/**'
+      - 'plugins/**'
+      - 'frontend/cmake/**'
+      - 'frontend/plugin-manager/**'
+      - 'frontend/utility/**'
+      - 'frontend/widgets/OBSAndroid*'
+      - 'android/**'
+      - '.github/workflows/android-compile.yml'
+  pull_request:
+    paths:
+      - 'cmake/android/**'
+      - 'libobs/**'
+      - 'libobs-opengl/**'
+      - 'plugins/**'
+      - 'android/**'
+      - '.github/workflows/android-compile.yml'
+
+concurrency:
+  group: android-compile-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NDK_VERSION: '30.0.16138531'
+  ABI: arm64-v8a
+  API: '29'
+
+jobs:
+  compile:
+    name: 依赖 + 编译验证 (arm64-v8a, 无 Qt)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 磁盘实况（清理前）
+        run: |
+          echo "::group::df -h"
+          df -h / /mnt 2>/dev/null || df -h
+          echo "::endgroup::"
+
+      - name: 腾出磁盘空间
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: true
+          android: false        # 保留 SDK：下面要用 sdkmanager
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: true
+
+      - name: 磁盘实况（清理后）
+        run: |
+          echo "::group::df -h"
+          df -h / /mnt 2>/dev/null || df -h
+          echo "::endgroup::"
+
+      - name: 安装 NDK ${{ env.NDK_VERSION }}
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
+          echo "ANDROID_SDK_ROOT=$SDK"
+          SDKMANAGER="$(command -v sdkmanager || true)"
+          if [ -z "$SDKMANAGER" ]; then
+            SDKMANAGER="$(ls -d "$SDK"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | head -1)"
+          fi
+          [ -n "$SDKMANAGER" ] || { echo "::error::找不到 sdkmanager"; exit 1; }
+          echo "sdkmanager = $SDKMANAGER"
+
+          # 已装过就直接用（runner 镜像可能自带）
+          if [ -d "$SDK/ndk/$NDK_VERSION" ]; then
+            echo "NDK $NDK_VERSION 已存在，跳过安装"
+          else
+            yes | "$SDKMANAGER" --install "ndk;$NDK_VERSION" --sdk_root="$SDK" || {
+              echo "::error::NDK $NDK_VERSION 安装失败，可用版本："
+              ls "$SDK/ndk" 2>/dev/null || true
+              "$SDKMANAGER" --list 2>/dev/null | grep -i 'ndk;' | head -20 || true
+              exit 1
+            }
+          fi
+          echo "NDK_ROOT=$SDK/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+
+      - name: 缓存依赖产物
+        id: deps-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            android/deps-android/prebuilt
+            ${{ env.HOME }}/deps-work/state
+          key: deps-${{ env.ABI }}-${{ hashFiles('android/deps-android/versions.sh', 'android/deps-android/defs.sh') }}
+          restore-keys: |
+            deps-${{ env.ABI }}-
+
+      - name: 下载依赖源码
+        run: bash android/deps-android/fetch.sh
+        env:
+          OBS_PROXY: ''          # CI 直连，不走代理
+
+      - name: 交叉编译依赖
+        run: bash android/deps-android/build.sh "${ABI}"
+        env:
+          NDK: ${{ env.NDK_ROOT }}
+          JOBS: 4
+
+      - name: 磁盘实况（依赖构建后）
+        run: |
+          echo "::group::df -h"
+          df -h /
+          echo "::endgroup::"
+          du -sh android/deps-android/prebuilt 2>/dev/null || true
+          du -sh "${HOME}/deps-work" 2>/dev/null || true
+
+      - name: 编译验证（libobs + GLES + 全部插件，跳过 Qt）
+        run: |
+          set -o pipefail
+          bash android/compile-check.sh 2>&1 | tee compile.log
+        env:
+          NDK: ${{ env.NDK_ROOT }}
+
+      - name: 失败时上传日志
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compile-logs
+          path: |
+            compile.log
+            build-android-*/CMakeFiles/CMakeOutput.log
+            build-android-*/CMakeFiles/CMakeError.log
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: 磁盘实况（结束时）
+        if: always()
+        run: df -h /
