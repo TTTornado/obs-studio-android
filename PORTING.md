@@ -37,11 +37,10 @@ git log --oneline
 - 14 个第三方依赖的交叉编译（`android/deps-android/`）
 - libobs / libobs-opengl(GLES) / 全部 `android-*` 采集插件的**编译与链接**
 - 产出 `libobs.so` 与各插件 `.so` 作为 artifact
+- **Qt 前端编译**（Qt 6.7.3）与 **APK 打包 + debug 签名**，产出可 sideload 的 APK
 
 **不覆盖**：
 
-- Qt 前端（另有一个 `continue-on-error` 的前端 job 在做探索）
-- APK 打包与签名
 - **任何运行时行为**——相机、UVC、MediaProjection、AAudio、推流在 CI 里都验证不了
 
 ---
@@ -60,6 +59,13 @@ NDK=$ANDROID_NDK_ROOT bash android/compile-check.sh
 ENABLE_FRONTEND=ON QT_DIR=~/Qt/6.9.3/android_arm64_v8a \
   QT_HOST_PATH=~/Qt/6.9.3/gcc_64 \
   NDK=$ANDROID_NDK_ROOT bash android/compile-check.sh
+
+# 4) 出可安装的 APK（构建 + androiddeployqt + apksigner）
+QT_DIR=~/Qt/6.7.3/android_arm64_v8a \
+  QT_HOST_PATH=~/Qt/6.7.3/gcc_64 \
+  NDK=$ANDROID_NDK_ROOT ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT \
+  bash android/build-apk.sh
+# 产物：OBS-Android-arm64-v8a-<mmdd-HHMM>.apk
 ```
 
 `fetch.sh` 的代理是**可选**的：本机开发设 `OBS_PROXY=http://127.0.0.1:7892`，CI 直连留空。
@@ -112,17 +118,31 @@ CMake Error at libobs/cmake/obs-core-modules.cmake:4 (target_sources):
 
 ---
 
-## Qt 的坑（前端 CI 的前置）
+## Qt 的坑（为什么 CI 用 6.7.3 而不是 6.9.3）
 
 Qt 官方公开镜像上，**Android 套件最新只到 6.7.3**：
 
 ```
-aqt list-qt linux android          → 5.9.0 … 6.7.3      （没有 6.8/6.9）
-aqt list-qt linux desktop --arch 6.9.3 → linux_gcc_64   （桌面版有 6.9.3）
+aqt list-qt linux android              → 5.9.0 … 6.7.3      （没有 6.8/6.9）
+aqt list-qt linux desktop --arch 6.9.3 → linux_gcc_64       （桌面版有 6.9.3）
 ```
 
-而本移植的目标是 Qt 6.9.3。所以前端 CI 目前在用 **6.7.3 试编**，目的是搞清楚 33.0 前端到底依赖哪些
-6.9 特性；如果 6.7.3 编不过且差异很大，再考虑用 Qt 账号 + secret 走官方安装器。
+本移植的目标是 Qt 6.9.3，但 Android 套件拿不到。于是用 6.7.3 试编，实测结果是：
+
+> **451 个前端编译目标里，只有 1 处编不过。**
+
+```
+frontend/plugin-manager/InstalledPluginRow.cpp:111: error: no matching member function for call to 'arg'
+    ...arg(kLegacyPluginInfoLink)      // 类型是 std::string_view
+```
+
+`QString::arg` 的 `std::string_view` 重载是 Qt 6.8 才加的，上游按 6.9 写。已在源码里用
+`QString::fromUtf8(...)` 显式转换（6.7/6.8/6.9 行为一致，不需要 `#if`）。
+
+**结论：Qt 6.7.3 足够编过并打出 APK**，不必为了"能编"去折腾 Qt 账号。
+代价是运行时行为与 6.9.3 可能有差异（控件样式、字体度量、`QStyle` 细节），
+而我们那套触屏适配（`devicePixelRatioF` 坐标映射、QSS 注入 `min-height: 48px`）
+恰恰依赖这些——**真机上要专门看一眼布局有没有走样**。
 
 ---
 
@@ -137,15 +157,18 @@ aqt list-qt linux desktop --arch 6.9.3 → linux_gcc_64   （桌面版有 6.9.3�
 - [x] 同步到上游 33.0.0（472 个上游改动文件，实际冲突 2 个）
 - [x] 插件装载重构成上游认可的 `PluginModuleLoader_Android.cpp`
 - [x] 补 `obs-core-modules-loader-android.c`（33.0 新增的按平台 loader）
-- [x] FFmpeg 7.1.3 → 8.0.3
+- [x] FFmpeg 7.1.3 → 8.0.3、补 `nlohmann_json` 3.11.3
 - [x] CI：依赖编译 + libobs/GLES/插件 编译链接验证
+- [x] Qt 6.7.3 前端编译（仅 1 行兼容改动）
+- [x] 4 个 P0：screen 死锁 / 相机旋转 / AAudio 自愈 / screen OOM
+- [x] APK 打包 + debug 签名 + artifact（`android/build-apk.sh`）
 
-### P0（真机必然撞到）
+### P0（尚未在真机验证）
 
-- [ ] `plugins/android-screen/screen-capture.c:404-408` 音频泵死锁
-- [ ] `plugins/android-camera/camera2-input.c:306,1246` sensor orientation 未旋转（预览横躺 90°）
-- [ ] `plugins/android-audio/aaudio-input.c:455-461` 拔插耳机后永久无声
-- [ ] `plugins/android-screen/screen-capture.c:529` 全屏 RGBA 不缩放（约 300MB，OOM）
+- [x] `plugins/android-screen/screen-capture.c` 音频泵死锁（拆 `audio_mx` / `audio_life_mx`）
+- [x] `plugins/android-camera/camera2-input.c` sensor orientation（`obs_source_set_async_rotation`）
+- [x] `plugins/android-audio/aaudio-input.c` 拔插耳机后永久无声（线程内自愈）
+- [x] `plugins/android-screen/screen-capture.c` 全屏 RGBA 的 OOM（`async_unbuffered`）
 - [ ] `libobs-opengl/gl-subsystem.c:132` + `gl-shaderparser.c:741` GL 版本门禁矛盾
 - [ ] `libobs/obs-android.c:256/327/378/427` 4 张宿主表无原子性/生命周期协议
 - [ ] `ObsForegroundService.java` 缺 `microphone` 前台类型（Android 14+ 后台录音静默断）
@@ -153,6 +176,6 @@ aqt list-qt linux desktop --arch 6.9.3 → linux_gcc_64   （桌面版有 6.9.3�
 
 ### 下一步
 
-- [ ] 前端 CI（Qt 6.7.3 试编）跑通或得出结论
-- [ ] APK 打包 + 签名 + artifact
+- [ ] 从 CI artifact 下载 APK，sideload 到真机
 - [ ] 真机回归：启动 → 预览 → 录制 → 摄像头 → 屏幕采集 → 内录 → UVC → 推流
+- [ ] 重点看 Qt 6.7.3 下触屏布局有没有走样（控件尺寸/字体度量与 6.9 有差异）

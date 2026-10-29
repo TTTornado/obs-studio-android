@@ -241,19 +241,19 @@ jobs:
         run: |
           echo "把上面的输出贴回会话，即可确定 Qt 版本策略。"
 
-  # 阶段 1A：用 Qt 6.7.3 试编前端。
+  # 阶段 2：打可安装的 APK。
   #
-  # 目的不是"一定要绿"，而是**拿到 33.0 前端对 Qt 6.9 特性的真实依赖清单**：
-  # 公开镜像上 Android 套件最新只到 6.7.3（6.8/6.9 拿不到），所以先用 6.7.3 试，
-  # 编不过就说明差在哪些 API 上，再决定值不值得走"Qt 账号 + secret"那条路。
+  # 用 Qt 6.7.3（公开镜像上 Android 套件的最新版本；6.8/6.9 拿不到，见 qt-probe job）。
+  # 实测 OBS 33.0 前端对 Qt 6.9 的**编译期**硬依赖只有 1 行
+  # （InstalledPluginRow.cpp 的 QString::arg(std::string_view)），已在源码里做了兼容，
+  # 所以 6.7.3 足够出包。
   #
-  # continue-on-error：探索阶段不让它把主构建的绿灯弄红。
-  frontend-qt:
-    name: 前端编译验证 (Qt 6.7.3 试编)
+  # 这个 job 不再 continue-on-error：要的就是"能不能拿到一个能装的包"这个确定答案。
+  apk:
+    name: 打 APK (Qt 6.7.3, arm64-v8a)
     runs-on: ubuntu-24.04
-    timeout-minutes: 180
-    continue-on-error: true
-    # 依赖 compile job 先把 deps 缓存存下来（这里用 fail-on-cache-miss 强制要求命中）。
+    timeout-minutes: 240
+    # 依赖 compile job 先把 deps 缓存存下来（这里 fail-on-cache-miss 强制要求命中）。
     needs: compile
 
     env:
@@ -307,24 +307,42 @@ jobs:
           ls -1 "${QT_ROOT}/${QT_VERSION}"
           echo "::endgroup::"
 
-      - name: 前端编译验证
+      - name: 构建 + 打包 + 签名
         run: |
           set -o pipefail
-          ENABLE_FRONTEND=ON \
+          # Gradle 8.14 不支持 JDK 21+，runner 默认就是 17，这里显式钉一下
+          if [ -n "${JAVA_HOME_17_X64:-}" ]; then export JAVA_HOME="$JAVA_HOME_17_X64"; fi
+          echo "JAVA_HOME=$JAVA_HOME"
+          java -version 2>&1 | sed 's/^/  /'
           QT_DIR="${QT_ROOT}/${QT_VERSION}/android_arm64_v8a" \
           QT_HOST_PATH="${QT_ROOT}/${QT_VERSION}/gcc_64" \
-          bash android/compile-check.sh 2>&1 | tee frontend.log
+          NDK="${NDK_ROOT}" \
+          bash android/build-apk.sh 2>&1 | tee apk.log
         env:
           NDK: ${{ env.NDK_ROOT }}
+
+      - name: 上传 APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: OBS-Android-apk
+          path: OBS-Android-*.apk
+          if-no-files-found: error
+          retention-days: 30
 
       - name: 失败时上传日志
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: frontend-logs
+          name: apk-logs
           path: |
-            frontend.log
-            build-android-*/CMakeFiles/CMakeOutput.log
-            build-android-*/CMakeFiles/CMakeError.log
+            apk.log
+            build-android-apk-*/CMakeFiles/CMakeOutput.log
+            build-android-apk-*/CMakeFiles/CMakeError.log
+            build-android-apk-*/frontend/android-build/build/outputs/logs/*.txt
           if-no-files-found: warn
           retention-days: 7
+
+      - name: 磁盘实况（结束时）
+        if: always()
+        run: df -h /
