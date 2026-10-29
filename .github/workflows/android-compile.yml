@@ -149,6 +149,42 @@ jobs:
         env:
           NDK: ${{ env.NDK_ROOT }}
 
+      # 归档链接产物：让"到底生成了哪些 .so、多大、符号在不在"可查，
+      # 而不是只能从日志里推断。
+      - name: 归档链接产物
+        if: success()
+        run: |
+          echo "::group::产物清单"
+          find build-android-* -name '*.so' -printf '%10s  %p\n' | sort -k2
+          echo "::endgroup::"
+          {
+            echo "# 链接产物清单（$(date -u +%FT%TZ)）"
+            echo
+            echo '```'
+            find build-android-* -name '*.so' -printf '%10s  %p\n' | sort -k2
+            echo '```'
+            echo
+            echo "## libobs.so 的 main 动态符号（APK 能否起的关键）"
+            echo '```'
+            NDK_BIN="$NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin"
+            "$NDK_BIN/llvm-readelf" --dyn-syms build-android-*/libobs/libobs.so 2>/dev/null | grep -w main || echo "（未找到 main）"
+            echo '```'
+          } > artifacts-manifest.md
+          cat artifacts-manifest.md
+
+      - name: 上传链接产物
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-native-libs
+          path: |
+            artifacts-manifest.md
+            build-android-*/libobs/libobs.so
+            build-android-*/libobs-opengl/*.so
+            build-android-*/plugins/**/*.so
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: 失败时上传日志
         if: failure()
         uses: actions/upload-artifact@v4
@@ -204,3 +240,91 @@ jobs:
       - name: 结论
         run: |
           echo "把上面的输出贴回会话，即可确定 Qt 版本策略。"
+
+  # 阶段 1A：用 Qt 6.7.3 试编前端。
+  #
+  # 目的不是"一定要绿"，而是**拿到 33.0 前端对 Qt 6.9 特性的真实依赖清单**：
+  # 公开镜像上 Android 套件最新只到 6.7.3（6.8/6.9 拿不到），所以先用 6.7.3 试，
+  # 编不过就说明差在哪些 API 上，再决定值不值得走"Qt 账号 + secret"那条路。
+  #
+  # continue-on-error：探索阶段不让它把主构建的绿灯弄红。
+  frontend-qt:
+    name: 前端编译验证 (Qt 6.7.3 试编)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    continue-on-error: true
+    # 依赖 compile job 先把 deps 缓存存下来（这里用 fail-on-cache-miss 强制要求命中）。
+    needs: compile
+
+    env:
+      QT_VERSION: '6.7.3'
+      QT_ROOT: ${{ github.workspace }}/.qt
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 磁盘实况
+        run: df -h /
+
+      - name: 安装 NDK ${{ env.NDK_VERSION }}
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
+          SDKMANAGER="$(command -v sdkmanager || ls -d "$SDK"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | head -1)"
+          [ -n "$SDKMANAGER" ] || { echo "::error::找不到 sdkmanager"; exit 1; }
+          if [ ! -d "$SDK/ndk/$NDK_VERSION" ]; then
+            set +e
+            yes 2>/dev/null | "$SDKMANAGER" --install "ndk;$NDK_VERSION" --sdk_root="$SDK"
+            set -e
+          fi
+          [ -d "$SDK/ndk/$NDK_VERSION" ] || { echo "::error::NDK 安装失败"; exit 1; }
+          echo "NDK_ROOT=$SDK/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+
+      - name: 恢复依赖缓存
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            android/deps-android/prebuilt
+            ~/deps-work/state
+          key: deps-${{ env.ABI }}-${{ hashFiles('android/deps-android/versions.sh', 'android/deps-android/defs.sh') }}
+          fail-on-cache-miss: true
+
+      - name: 缓存 Qt
+        id: qt-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.QT_ROOT }}
+          key: qt-${{ env.QT_VERSION }}-android-arm64
+
+      - name: 安装 Qt ${{ env.QT_VERSION }}
+        if: steps.qt-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          pip install --quiet aqtinstall
+          aqt install-qt linux android "${QT_VERSION}" android_arm64_v8a -O "${QT_ROOT}"
+          aqt install-qt linux desktop "${QT_VERSION}" linux_gcc_64 -O "${QT_ROOT}"
+          echo "::group::安装结果"
+          ls -1 "${QT_ROOT}/${QT_VERSION}"
+          echo "::endgroup::"
+
+      - name: 前端编译验证
+        run: |
+          set -o pipefail
+          ENABLE_FRONTEND=ON \
+          QT_DIR="${QT_ROOT}/${QT_VERSION}/android_arm64_v8a" \
+          QT_HOST_PATH="${QT_ROOT}/${QT_VERSION}/gcc_64" \
+          bash android/compile-check.sh 2>&1 | tee frontend.log
+        env:
+          NDK: ${{ env.NDK_ROOT }}
+
+      - name: 失败时上传日志
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-logs
+          path: |
+            frontend.log
+            build-android-*/CMakeFiles/CMakeOutput.log
+            build-android-*/CMakeFiles/CMakeError.log
+          if-no-files-found: warn
+          retention-days: 7

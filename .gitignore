@@ -28,6 +28,8 @@
 !CMakePresets.json
 !COC.rst
 !COMMITMENT
+# 移植说明（本 fork 新增的根级文档，必须显式放行，否则会被上面的 /* 吞掉）
+!/PORTING.md
 !CONTRIBUTING.md
 !CODESTYLE.md
 !COPYING

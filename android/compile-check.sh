@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Android 编译验证：配置 + 构建 libobs / GLES 后端 / 全部采集插件。
 #
-# 这个脚本**不需要 Qt**：frontend/CMakeLists.txt 第 5 行在 find_package(Qt6) 之前
+# 默认**不需要 Qt**：frontend/CMakeLists.txt 第 5 行在 find_package(Qt6) 之前
 # 就 `if(NOT ENABLE_FRONTEND) return()`，所以 -DENABLE_FRONTEND=OFF 会把整个 Qt
 # 前端跳过。因此它可以在任何 Linux（含 GitHub Actions）上跑，用来验证移植的非 UI 部分。
+#
+# 需要验证前端时设 ENABLE_FRONTEND=ON，并给出 QT_DIR 与 QT_HOST_PATH（见下方环境变量）。
 #
 # 用法：
 #   android/compile-check.sh [构建目录]
@@ -65,18 +67,37 @@ if [ -n "${ANDROID_SDK_ROOT:-}" ]; then
   EXTRA_SDK+=("-DANDROID_SDK_ROOT=$ANDROID_SDK_ROOT")
 fi
 
+# 前端默认关闭（不需要 Qt）。ENABLE_FRONTEND=ON 时需要：
+#   QT_DIR        Qt for Android 套件，如 ~/Qt/6.9.3/android_arm64_v8a
+#   QT_HOST_PATH  桌面套件（提供 androiddeployqt），如 ~/Qt/6.9.3/gcc_64
+ENABLE_FRONTEND="${ENABLE_FRONTEND:-OFF}"
+PREFIX_PATH="$DEPS"
+EXTRA_FE=()
+if [ "$ENABLE_FRONTEND" = "ON" ]; then
+  [ -n "${QT_DIR:-}" ] || { echo "FATAL: ENABLE_FRONTEND=ON 但未设置 QT_DIR" >&2; exit 1; }
+  [ -n "${QT_HOST_PATH:-}" ] || { echo "FATAL: ENABLE_FRONTEND=ON 但未设置 QT_HOST_PATH" >&2; exit 1; }
+  [ -d "$QT_DIR" ] || { echo "FATAL: QT_DIR 不存在: $QT_DIR" >&2; exit 1; }
+  [ -d "$QT_HOST_PATH" ] || { echo "FATAL: QT_HOST_PATH 不存在: $QT_HOST_PATH" >&2; exit 1; }
+  PREFIX_PATH="$DEPS;$QT_DIR"
+  EXTRA_FE+=("-DQT_HOST_PATH=$QT_HOST_PATH")
+  echo "前端 = ON    QT_DIR=$QT_DIR    QT_HOST_PATH=$QT_HOST_PATH"
+else
+  echo "前端 = OFF（跳过 Qt）"
+fi
+
 cmake -S "$ROOT" -B "$BUILD" -G Ninja \
   -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
   -DANDROID_ABI="$ABI" \
   -DANDROID_PLATFORM="android-$API" \
   -DANDROID_STL=c++_shared \
   -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
-  -DCMAKE_PREFIX_PATH="$DEPS" \
+  -DCMAKE_PREFIX_PATH="$PREFIX_PATH" \
   -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
   -DOBS_VERSION_OVERRIDE="$OBS_VERSION_OVERRIDE" \
-  -DENABLE_FRONTEND=OFF \
+  -DENABLE_FRONTEND="$ENABLE_FRONTEND" \
   -DENABLE_SCRIPTING=OFF \
   -DENABLE_HEVC=ON \
+  "${EXTRA_FE[@]}" \
   "${EXTRA_SDK[@]}" || {
   echo "FATAL: CMake 配置失败" >&2
   exit 1
