@@ -15,6 +15,7 @@ target_sources(
   libobs
   PRIVATE
     obs-android.c
+    obs-core-modules-loader-android.c
     obs-nix-platform.c
     audio-monitoring/null/null-audio-monitoring.c
     util/pipe-posix.c
