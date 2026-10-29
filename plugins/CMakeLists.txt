@@ -155,6 +155,13 @@ if(OS_ANDROID)
   #                       （P-5 已闭环），设置里那 7 个只有 ffmpeg muxer 才支持的封装格式
   #                       （mkv/flv/mov/mpegts/hls…）在 Android 上仍不可选 —— 归 P-6 前端清单。
   add_subdirectory(obs-ffmpeg)
+  # OBS 33.0 新增：obs-core-modules.c 由 set_obs_core_modules() 用 configure_file
+  # 生成到 libobs 的 binary 目录，而 libobs/cmake/obs-core-modules.cmake:4 的
+  # target_sources 引用的是相对名 obs-core-modules.c —— 不生成就报
+  # "Cannot find source file: obs-core-modules.c"（Generate 阶段失败）。
+  # 上游在文件末尾（:257）调用它，本分支提前 return 会跳过，因此这里补一次，
+  # 与上面 ENABLE_CORE_MODULES=OFF 分支（:18）的写法一致。
+  set_obs_core_modules()
   return()
 endif()
 
