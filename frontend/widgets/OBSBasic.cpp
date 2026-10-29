@@ -25,6 +25,16 @@
 #include "OBSBasicStats.hpp"
 #include "plugin-manager/PluginManager.hpp"
 
+#ifdef __ANDROID__
+#include "OBSAndroidDisplay.hpp" // 3-4 校形探针日志（logcat tag OBS-display）
+#include "OBSAndroidKeepAlive.hpp"
+#include "OBSAndroidPermissions.hpp"
+#include "OBSAndroidUsb.hpp" // USB host 总线注册（logcat tag OBS-usb）
+#include <QListView> // 3-4 命中区：列表行高
+#include <QToolBar> // 3-4 命中区：场景/源两排工具按钮
+#include <QToolButton>
+#endif
+
 #include <obs-module.h>
 
 #ifdef YOUTUBE_ENABLED
@@ -58,6 +68,7 @@
 #include <qt-wrappers.hpp>
 
 #include <QActionGroup>
+#include <QCoreApplication>
 #include <QThread>
 #include <QWidgetAction>
 
@@ -172,6 +183,86 @@ OBSBasic::OBSBasic(QWidget *parent) : OBSMainWindow(parent), undo_s(ui), ui(new 
 		},
 		Qt::DirectConnection);
 
+#ifdef __ANDROID__
+	/* 3-5 前台保活：有输出在跑就把进程钉在前台档（HOME 切后台不再被当成缓存进程回收 ——
+	 * 8.20 实测的 `has died: cch CRE`）。
+	 *
+	 * 这里**不**做"Started 起 / Stopped 停"的配对计数：推流可以在 StreamingStopFail 那条路上
+	 * 停掉、录制可以因写盘错误直接 Stopped，配对少一条就永久漏着通知。改成"读一次真相
+	 * （StreamingActive()/RecordingActive()）再决定起停"，幂等、不会漏。
+	 *
+	 * 但"信号来了当场读"build 52 实测是错的：`RecordingStopped` 发出的那一刻，
+	 * `obs_output_active(fileOutput)` **还是 true**（日志里那一次复核又 start 了一遍，
+	 * 连录三次后 Java 侧 describe 仍是 stop=0，通知永远挂着 —— libobs 要到 `stop_thread`
+	 * 函数尾才 `os_atomic_set_bool(&output->active, false)`，前端那句 `emit RecordingStopped()`
+	 * 排在它前面）。改成：状态信号只把复核排回 GUI 线程事件循环（＝排在当前这层信号栈之后）
+	 * 并打开 1 秒看门狗，看门狗读到 idle 才停服务、顺手关自己 —— build 53 实测下一个 tick
+	 * 就读到 false 并 `stopService #1` + `onDestroy`。代价 = 输出结束后最多 1 秒才松手，
+	 * 换来不依赖信号配对（`StreamingStopFail` 那条路仍被看门狗兜住）。
+	 * 排队这一步还有个附带好处：`QTimer` 只能被它的主人线程动，复核统一在 GUI 线程做就不用操心这个。 */
+	QTimer *keepAliveWatchdog = new QTimer(this);
+	keepAliveWatchdog->setInterval(1000);
+
+	auto applyKeepAlive = [this, keepAliveWatchdog](const char *why) {
+		const bool streaming = StreamingActive();
+		const bool recording = RecordingActive();
+		const char *state = (streaming && recording) ? "streaming+recording"
+			      : streaming                     ? "streaming"
+			      : recording                     ? "recording"
+			                                      : "idle";
+		QString detail;
+		obsAndroidKeepAliveSetRunning(streaming || recording, state, &detail);
+		/* 看门狗每秒复核一次，只在状态真的变了时才占日志。本 lambda 只在 GUI 线程跑，static 不用加锁。 */
+		static QString lastState;
+		const QString now = QString::fromUtf8(state);
+		if (now != lastState) {
+			lastState = now;
+			blog(LOG_INFO, "OBSBasic[Android]: 3-5 保活复核（%s）→ %s", why, detail.toUtf8().constData());
+		}
+		if (streaming || recording) {
+			if (!keepAliveWatchdog->isActive()) {
+				keepAliveWatchdog->start();
+			}
+		} else {
+			keepAliveWatchdog->stop();
+		}
+	};
+	/* 排队而不是就地执行：要的是"当前这层信号栈跑完之后"再读真相，那一刻 active 才落定。 */
+	auto syncKeepAlive = [this, applyKeepAlive](const char *why) {
+		QMetaObject::invokeMethod(this, [applyKeepAlive, why] { applyKeepAlive(why); }, Qt::QueuedConnection);
+	};
+	connect(keepAliveWatchdog, &QTimer::timeout, this, [applyKeepAlive] { applyKeepAlive("watchdog"); });
+	connect(this, &OBSBasic::StreamingStarted, this, [syncKeepAlive] { syncKeepAlive("StreamingStarted"); },
+		Qt::DirectConnection);
+	connect(this, &OBSBasic::StreamingStopping, this, [syncKeepAlive] { syncKeepAlive("StreamingStopping"); },
+		Qt::DirectConnection);
+	connect(this, &OBSBasic::StreamingStopped, this, [syncKeepAlive] { syncKeepAlive("StreamingStopped"); },
+		Qt::DirectConnection);
+	connect(this, &OBSBasic::RecordingStarted, this, [syncKeepAlive] { syncKeepAlive("RecordingStarted"); },
+		Qt::DirectConnection);
+	connect(this, &OBSBasic::RecordingStopping, this, [syncKeepAlive] { syncKeepAlive("RecordingStopping"); },
+		Qt::DirectConnection);
+	connect(this, &OBSBasic::RecordingStopped, this, [syncKeepAlive] { syncKeepAlive("RecordingStopped"); },
+		Qt::DirectConnection);
+
+	/* P-17：先把相机权限总线接进 libobs，再弹首启那一批申请框 —— 采集源插件只链 libobs，
+	 * 没有这一句它就问不到 CAMERA（obs_android_camera_ready() 恒 false）。 */
+	obsAndroidPermissionsRegisterCameraBus();
+
+	/* P-18-a：屏幕采集同意总线同一批接线（obs_android_screen_* 的两格）。它不弹框，只是把
+	 * "问令牌/要令牌"两条腿插进 libobs，等采集源插件来问；Java 那边对应 ObsProjectionHost。 */
+	obsAndroidPermissionsRegisterScreenBus();
+
+	/* USB host 总线同一批接线（obs_android_usb_* 的四格，自 android-shell 移植）。不弹框，
+	 * 只是把"枚举/授权/open_fd/close_fd"插进 libobs，等 android-capture 的 UVC 源来问；
+	 * Java 那边对应 ObsUsbHost。USB 授权框是后来属性页按需弹的（异步），不在这里弹。 */
+	obsAndroidUsbRegisterBus();
+
+	/* 3-5 第 3 项：运行时权限批量申请（RECORD_AUDIO + POST_NOTIFICATIONS + CAMERA，第三项是 P-17
+	 * 加进来的）。已在 Java 侧做过"缺了才弹"，每次都调这一句是安全的。 */
+	obsAndroidPermissionsRequestStartup();
+#endif
+
 	/* Add controls dock */
 	OBSBasicControls *controls = new OBSBasicControls(this);
 	controlsDock = new OBSDock(this);
@@ -200,6 +291,13 @@ OBSBasic::OBSBasic(QWidget *parent) : OBSMainWindow(parent), undo_s(ui), ui(new 
 	connect(controls, &OBSBasicControls::StudioModeButtonClicked, this, &OBSBasic::TogglePreviewProgramMode);
 
 	connect(controls, &OBSBasicControls::SettingsButtonClicked, this, &OBSBasic::on_action_Settings_triggered);
+
+#ifdef __ANDROID__
+	connect(controls, &OBSBasicControls::FlipCameraButtonClicked, this, &OBSBasic::FlipAndroidCamera);
+	/* 按钮起始是隐藏的（构造函数里不知道场景长什么样）；这里先刷一次，后面每次换场景/换选中源
+	 * 都由 UpdateContextBar 顶上那一句接手。 */
+	UpdateAndroidFlipCameraButton();
+#endif
 
 	/* Set up transitions combobox connections */
 	connect(this, &OBSBasic::TransitionAdded, this, [this](const QString &name, const QString &uuid) {
@@ -756,6 +854,48 @@ bool OBSBasic::InitBasicConfigDefaults()
 	config_set_default_double(activeConfiguration, "Audio", "MeterDecayRate", VOLUME_METER_DECAY_FAST);
 	config_set_default_uint(activeConfiguration, "Audio", "PeakMeterType", 0);
 
+#ifdef __ANDROID__
+	/* Android（P-6④ / P-7 实测）：录像只有 hybrid 两档容器能用 —— SimpleOutput 与 AdvancedOutput 把
+	 * 非 hybrid 一律映射到 `ffmpeg_muxer`，而那个伴生进程按决策 8 根本没编 ⇒ 选了就是"点录制 → 0.8 秒后
+	 * 静默失败"，UI 上毫无提示；`RecQuality=Lossless` 更狠，`SimpleOutput.cpp:49-58` 直接把容器硬写成 avi。
+	 * 设置页的下拉已经裁过（`OBSBasicSettings.cpp::LoadFormats` 的 `#ifndef __ANDROID__`），但那挡得住
+	 * **在这台机器上改设置的人**、挡不住从桌面拷来的 profile：那句 `RecFormat2=mkv` 会绕过下拉直达
+	 * `ConfigureRecording`。09-07 实测过更绕的一种：下拉显示"混合 MP4"、配置里却仍是 mkv，因为
+	 * `SaveComboData()` 外面套着 `if (WidgetChanged(widget))`（而 `OutputsChanged()` 又让 loading 期间的
+	 * 程序化改动一律不算改动）⇒ 用户没亲手点过那一项，就永远不会把修好的值写回去。
+	 * ⇒ 在 profile 刚落地成内存配置的这一步纠正（`SetCurrentProfile` 末尾原有的 `SaveSafe("tmp")` 负责写盘）。 */
+	auto clampContainer = [this](const char *section) {
+		const char *cur = config_get_string(activeConfiguration, section, "RecFormat2");
+		if (strcmp(cur, "hybrid_mp4") == 0 || strcmp(cur, "hybrid_mov") == 0) {
+			return;
+		}
+		blog(LOG_WARNING, "Android 配置纠正：[%s] RecFormat2='%s' 本平台不可用（ffmpeg_muxer 未随包）⇒ 改用 '%s'",
+		     section, cur, DEFAULT_CONTAINER);
+		config_set_string(activeConfiguration, section, "RecFormat2", DEFAULT_CONTAINER);
+	};
+	clampContainer("SimpleOutput");
+	clampContainer("AdvOut");
+
+	const char *qual = config_get_string(activeConfiguration, "SimpleOutput", "RecQuality");
+	if (strcmp(qual, "Lossless") == 0) {
+		blog(LOG_WARNING, "Android 配置纠正：SimpleOutput RecQuality='Lossless' 会把容器硬写成 avi"
+				  "（SimpleOutput.cpp:49-58）⇒ 改用 'Stream'");
+		config_set_string(activeConfiguration, "SimpleOutput", "RecQuality", "Stream");
+	}
+
+	/* P-12：另一条独立入口 —— 高级输出的「录制 → 类型」选「自定义输出 (FFmpeg)」时，`AdvOut/RecType`
+	 * 一旦落成 "FFmpeg"，`AdvancedOutput::CreateStreaming` 之外的整条录制管线（`AdvancedOutput.cpp:62`、
+	 * `OBSBasic_Recording.cpp:37/386`）都会改走 `ffmpeg_muxer`，绕开上面那两张裁过的容器表。设置页里
+	 * 这一档已经从下拉收掉（`OBSBasicSettings.cpp` 构造函数的 `#ifdef`），但下拉只挡得住在这台机器上点的人，
+	 * 挡不住从桌面拷来的 profile ⇒ 与 `clampContainer` 同一层纠正。 */
+	const char *recType = config_get_string(activeConfiguration, "AdvOut", "RecType");
+	if (strcmp(recType, "Standard") != 0) {
+		blog(LOG_WARNING, "Android 配置纠正：AdvOut RecType='%s' 本平台不可用（ffmpeg_muxer 未随包）⇒ 改用 'Standard'",
+		     recType);
+		config_set_string(activeConfiguration, "AdvOut", "RecType", "Standard");
+	}
+#endif
+
 	CheckExistingCookieId();
 
 	return true;
@@ -947,6 +1087,13 @@ void OBSBasic::OBSInit()
 	if (!InitService()) {
 		throw "Failed to initialize service";
 	}
+#ifdef __ANDROID__
+	/* 判据：装了 rtmp-services 之后这条应恒为 rtmp_common/rtmp。 */
+	if (obs_service_t *svc = GetService()) {
+		obsAndroidDisplayLog("P-2 服务态：'%s' 类型=%s 协议=%s", obs_service_get_name(svc), obs_service_get_id(svc),
+				     obs_service_get_protocol(svc));
+	}
+#endif
 
 	ResetOutputs();
 	CreateHotkeys();
@@ -1126,6 +1273,104 @@ void OBSBasic::OBSInit()
 		}
 	}
 
+#ifdef __ANDROID__
+	/* 3-4 16:10 校形。上面恢复回来的 DockState 是上一轮 saveState() 存的原样，那套比例是给桌面
+	 * 键鼠的：1600x1000 实测下排占 325 px（顶它的是控制按钮那一竖列 5 行，本轮已改两列）、
+	 * 空混音器还横吃 710 px，预览面因此左右各黑 179 px。
+	 * 恢复完再按屏幕尺寸重给一遍。每轮启动都强制 —— Android 上 dock 分隔条拖不动，没有"用户手动值"
+	 * 会被覆盖。resizeDocks 会被各 dock 的 minimumSizeHint 顶住，实际落点看下面那条回读。
+	 *
+	 * 左栏给到 30% 不是审美：命中区抬到 48 dp 以后，场景/源那两排工具栏是 6 个钮 = 288 逻辑像素，
+	 * 34i 实测 24%（=265）装不下，**下移按钮被裁掉点不到了**。下排三个 dock 按"左栏剩下的宽度"分
+	 * （不是整窗宽）—— 34i 那版按整窗宽算，加起来 992 > 可用的 799，等于让 Qt 自己去归一化，
+	 * 落点不可控。比例沿用 34i 实测落点：混音器 51 / 转场 16 / 控制 33。 */
+	{
+		const int w = width();
+		const int h = height();
+		const int side = w * 30 / 100;
+		const int bottom = h * 20 / 100;
+		const int restW = w - side;
+		const int mixerW = restW * 51 / 100;
+		const int transW = restW * 16 / 100;
+		const int controlsW = restW * 33 / 100;
+		resizeDocks({ui->scenesDock, ui->sourcesDock}, {side, side}, Qt::Horizontal);
+		resizeDocks({ui->mixerDock, ui->transitionsDock, controlsDock},
+			    {mixerW, transW, controlsW}, Qt::Horizontal);
+		resizeDocks({ui->mixerDock, ui->transitionsDock, controlsDock}, {bottom, bottom, bottom},
+			    Qt::Vertical);
+		obsAndroidDisplayLog("3-4 校形：窗口 %dx%d → 请求 左栏%d 下排高%d（下排总宽%d 控制%d）", w, h, side,
+				     bottom, restW, controlsW);
+		QTimer::singleShot(0, this, [this] {
+			obsAndroidDisplayLog("3-4 校形：落定 混音器=%dx%d 转场=%dx%d 控制=%dx%d",
+					     ui->mixerDock->width(), ui->mixerDock->height(),
+					     ui->transitionsDock->width(), ui->transitionsDock->height(),
+					     controlsDock->width(), controlsDock->height());
+		});
+	}
+
+	/* 3-4 触摸命中区。Android 触摸目标下限 48 dp，Qt 在 Android 上的逻辑像素就是 dp（1600x1000 物理
+	 * = 1067x667 逻辑，密度 1.5 —— 34h 用 updateRect 的 px/逻辑比反推过）。而 .ui 里
+	 * scenesToolbar/sourcesToolbar 的 iconSize 是 16x16，够不上。
+	 * 工具按钮用 setMinimumSize 而不是样式表：样式表一沾 QToolButton，主题画的那层底就没了。
+	 *
+	 * 两个列表的行高走两条路，因为是两套机制：
+	 *  - 源列表：SourceTreeDelegate::sizeHint 直接返回行高，样式表盖不过它（34i 实测 30→30 无效），
+	 *    那一刀夹在 SourceTreeDelegate.cpp；34j 实测 48 ✓。
+	 *  - 场景列表：走默认 QStyledItemDelegate，样式表说了算（34i 实测 25→58 ✓）；34j 回读还是 25，
+	 *    量了一下选中行那条蓝带只有 40 物理 px = 27 dp，所以这条得留着。
+	 *    已知代价：SceneTree::SetGridMode() 会整个覆盖 widget 样式表，切一次网格模式这条就没了。 */
+	{
+		/* 只给"真挂在 toolbar 上的动作按钮"设最小尺寸，别用 findChildren<QToolButton*>：
+		 * 那还会捞到 QToolBar 的扩展钮（">>"，平时不可见）—— 两排工具栏各 5 个动作，探针却都数到 6，
+		 * 多的就是它。给它也塞 48x48 下限，toolbar 算溢出时要替它留出 48 px，真实宽度不够就把
+		 * 后面的动作全收进扩展菜单：34k 实测 16:9→16:10 实时改分辨率后，两排从 5 个钮掉到 2 个
+		 * （b34k-03-1610-after-rotate.png）。走 actions()+widgetForAction 才只碰得到真按钮。 */
+		auto bumpToolbar = [](QToolBar *bar) {
+			bar->setIconSize(QSize(24, 24));
+			int bumped = 0;
+			const auto actions = bar->actions();
+			for (QAction *act : actions) {
+				if (act->isSeparator())
+					continue;
+				if (auto *b = qobject_cast<QToolButton *>(bar->widgetForAction(act))) {
+					b->setMinimumSize(48, 48);
+					++bumped;
+				}
+			}
+			return bumped;
+		};
+		const int sceneButtons = bumpToolbar(ui->scenesToolbar);
+		const int sourceButtons = bumpToolbar(ui->sourcesToolbar);
+
+		ui->scenes->setStyleSheet(ui->scenes->styleSheet() + " QListView::item { min-height: 48px; }");
+
+		obsAndroidDisplayLog("3-4 命中区：动作钮 场景=%d 源=%d → 48dp；行高 场景=%d 源=%d", sceneButtons,
+				     sourceButtons, ui->scenes->sizeHintForRow(0), ui->sources->sizeHintForRow(0));
+		QTimer::singleShot(0, this, [this] {
+			auto visibleCount = [](QToolBar *bar) {
+				int n = 0;
+				const auto actions = bar->actions();
+				for (QAction *act : actions) {
+					if (act->isSeparator())
+						continue;
+					const QWidget *b = bar->widgetForAction(act);
+					if (b && b->isVisible())
+						++n;
+				}
+				return n;
+			};
+			const QToolButton *b = ui->scenesToolbar->findChild<QToolButton *>();
+			obsAndroidDisplayLog("3-4 命中区：落定 行高 场景=%d 源=%d 首个工具钮=%dx%d 可见动作钮 场景=%d/%d"
+					     " 源=%d/%d 工具栏宽=%d",
+					     ui->scenes->sizeHintForRow(0), ui->sources->sizeHintForRow(0),
+					     b ? b->width() : -1, b ? b->height() : -1,
+					     visibleCount(ui->scenesToolbar), ui->scenesToolbar->actions().size(),
+					     visibleCount(ui->sourcesToolbar), ui->sourcesToolbar->actions().size(),
+					     ui->scenesToolbar->width());
+		});
+	}
+#endif
+
 	bool pre23Defaults = config_get_bool(App()->GetUserConfig(), "General", "Pre23Defaults");
 	if (pre23Defaults) {
 		bool resetDockLock23 = config_get_bool(App()->GetUserConfig(), "General", "ResetDockLock23");
@@ -1163,7 +1408,26 @@ void OBSBasic::OBSInit()
 	}
 
 	if (!first_run && !has_last_version && !Active()) {
+#ifdef __ANDROID__
+		/* P-6⑥ 复核（2026-09-06，双 ABI `pm clear` 首启实测）：这条留着，但 P-3 那三条理由只剩一条半，
+		   而且这条分支是**头一回被实证真跑过** —— `pm clear` 后那次冷启动日志里正好出现 1 次下面那行、
+		   第二次启动归零（FirstRun 已落盘），两帧中心区 PSNR=inf ⇒ 首启没有模态框压住主窗。逐条：
+		   ① 仍然成立，且比 P-3 更硬：向导是 `setModal(true)` + `exec()` 的阻塞嵌套事件循环
+		      （OBSBasic_MainControls.cpp:663），而下面这行日志打在 `3-3 setVisible(true)` 之前 43 ms（arm64）
+		      / 8 ms（x86_64）⇒ 主窗还没露面就会先进嵌套循环，正是 3-3 那一类病灶。
+		   ② 只剩一半：「要 RTMP 协议在场」作废（obs-outputs 自 P-5 进包、RTMP 端到端自 P-7 双 ABI 可用）；
+		      真的是「服务端测试要打公网」—— `AutoConfig::CanTestServer()`（wizards/AutoConfig.cpp:236）
+		      对非 Twitch 一律 return true，会拿已配好的服务真连对端。
+		   ③ **原先是错的**：`h264_mediacodec`/`hevc_mediacodec` 在整棵树里不存在，`TestHardwareEncoding()`
+		      只认 nvenc/qsv/amf/videotoolbox ⇒ Android 上 `hardwareEncodingAvailable=false`，编码档根本不跑；
+		      它真跑起来创建的是 `obs_x264`（AutoConfigTestPage.cpp:121 与 :493），P-1 起就在包里。
+		   触发条件 `!first_run && !has_last_version && !Active()` 只在全新配置的那一次成立，但 Android 上
+		   `has_last_version` 恒假（AppConfig 落到的 global.ini 是 0 字节）⇒ 实际只有 FirstRun 一道闸：
+		   要撤这条，先把向导改成非模态、或把首启入口收掉，否则一个模态 exec() 会挡在还没露面的主窗前面。 */
+		blog(LOG_INFO, "Android: skipping auto-configuration wizard on first run");
+#else
 		QMetaObject::invokeMethod(this, &OBSBasic::on_autoConfigure_triggered, Qt::QueuedConnection);
+#endif
 	}
 
 #if (defined(_WIN32) || defined(__APPLE__)) && (OBS_RELEASE_CANDIDATE > 0 || OBS_BETA > 0)

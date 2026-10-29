@@ -24,6 +24,9 @@
 #include <utility/BaseLexer.hpp>
 #include <utility/OBSTranslator.hpp>
 #include <utility/platform.hpp>
+#ifdef __ANDROID__
+#include <utility/AndroidRuntimeBootstrap.hpp>
+#endif
 
 #include <qt-wrappers.hpp>
 #include <util/platform.h>
@@ -881,6 +884,14 @@ static void set_process_mitigation_policies()
 
 int main(int argc, char *argv[])
 {
+#ifdef __ANDROID__
+	/* APK 里的数据是打给 Qt 资源的（:/obsdata、:/obsfrontenddata，见 cmake/os-android.cmake），
+	 * 得先落到应用私有目录、再用 OBS_ROOT_PATH 公布出来，libobs 的 find_libobs_data_file()
+	 * 与平台的 GetDataFilePath() 才认得路。必须放在 main() 最前面：第一次要数据的
+	 * OBSApp::InitLocale() 跑在 OBSApp 构造之后、obs_startup 前后不久，没有更早的钩子。 */
+	PrepareAndroidRuntimePaths();
+#endif
+
 #ifndef _WIN32
 	using SignalHandlerCallback = decltype(OBSApp::sigIntSignalHandler);
 

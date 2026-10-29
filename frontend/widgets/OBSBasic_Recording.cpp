@@ -27,6 +27,10 @@
 #include <QDesktopServices>
 #include <QFileInfo>
 
+#ifdef __ANDROID__
+#include "OBSAndroidPath.hpp"
+#endif
+
 void OBSBasic::on_actionShow_Recordings_triggered()
 {
 	const char *mode = config_get_string(activeConfiguration, "Output", "Mode");
@@ -36,7 +40,11 @@ void OBSBasic::on_actionShow_Recordings_triggered()
 				       : config_get_string(activeConfiguration, "AdvOut", "RecFilePath");
 	const char *path = strcmp(mode, "Advanced") ? config_get_string(activeConfiguration, "SimpleOutput", "FilePath")
 						    : adv_path;
+#ifdef __ANDROID__
+	obsAndroidShowLocalPath(this, "显示录像", QString::fromUtf8(path));
+#else
 	QDesktopServices::openUrl(QUrl::fromLocalFile(path));
+#endif
 }
 
 #define RECORDING_START "==== Recording Start ==============================================="
@@ -152,7 +160,7 @@ void OBSBasic::StopRecording()
 {
 	SaveProject();
 
-	if (outputHandler->RecordingActive()) {
+	if (RecordingActive()) {
 		outputHandler->StopRecording(recordingStopping);
 	}
 
@@ -256,7 +264,7 @@ void OBSBasic::RecordingFileChanged(QString lastRecordingPath)
 
 void OBSBasic::RecordActionTriggered()
 {
-	if (outputHandler->RecordingActive()) {
+	if (RecordingActive()) {
 		bool confirm = config_get_bool(App()->GetUserConfig(), "BasicWindow", "WarnBeforeStoppingRecord");
 
 		if (confirm && isVisible()) {

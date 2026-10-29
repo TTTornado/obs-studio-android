@@ -20,7 +20,11 @@ target_sources(
     plugin-manager/PluginModuleLoader.hpp
 )
 
-if(OS_WINDOWS)
+if(OS_ANDROID)
+  # Android 上没有可扫描的插件目录（APK 的 .so 不落盘），改为按构建期白名单
+  # 从 APK 内按裸文件名 dlopen。详见 PluginModuleLoader_Android.cpp 的注释。
+  target_sources(obs-studio PRIVATE plugin-manager/PluginModuleLoader_Android.cpp)
+elseif(OS_WINDOWS)
   target_sources(obs-studio PRIVATE plugin-manager/PluginModuleLoader_Windows.cpp)
 elseif(OS_MACOS)
   target_sources(obs-studio PRIVATE plugin-manager/PluginModuleLoader_MacOS.mm)

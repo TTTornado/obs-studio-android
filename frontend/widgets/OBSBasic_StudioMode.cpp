@@ -20,6 +20,7 @@
 #include "OBSBasic.hpp"
 #include "OBSProjector.hpp"
 
+#include <utility/AndroidMenuPos.hpp>
 #include <utility/display-helpers.hpp>
 #include <utility/QuickTransition.hpp>
 
@@ -110,12 +111,12 @@ void OBSBasic::CreateProgramOptions()
 
 	programOptions->setLayout(layout);
 
-	auto onAdd = [this]() {
+	auto onAdd = [this, addQuickTransition]() {
 		QScopedPointer<QMenu> menu(CreateTransitionMenu(this, nullptr));
-		menu->exec(QCursor::pos());
+		menu->exec(OBSMenuPos(OBSMenuPosBelow(addQuickTransition)));
 	};
 
-	auto onConfig = [this]() {
+	auto onConfig = [this, configTransitions]() {
 		QMenu menu(this);
 		QAction *action;
 
@@ -168,7 +169,7 @@ void OBSBasic::CreateProgramOptions()
 		connect(action, &QAction::triggered, this, toggleSwapScenesMode);
 		connect(action, &QAction::hovered, action, showToolTip);
 
-		menu.exec(QCursor::pos());
+		menu.exec(OBSMenuPos(OBSMenuPosBelow(configTransitions)));
 	};
 
 	connect(transitionButton.data(), &QAbstractButton::clicked, this, &OBSBasic::TransitionClicked);
@@ -374,7 +375,7 @@ OBSSource OBSBasic::GetProgramSource()
 	return OBSGetStrongRef(programScene);
 }
 
-void OBSBasic::ProgramViewContextMenuRequested()
+void OBSBasic::ProgramViewContextMenuRequested(const QPoint &pos)
 {
 	QMenu popup(this);
 	QPointer<QMenu> studioProgramProjector;
@@ -389,7 +390,7 @@ void OBSBasic::ProgramViewContextMenuRequested()
 	popup.addSeparator();
 	popup.addAction(QTStr("Screenshot.StudioProgram"), this, &OBSBasic::ScreenshotProgram);
 
-	popup.exec(QCursor::pos());
+	popup.exec(OBSMenuPos(program ? program->mapToGlobal(pos) : QPoint(-1, -1)));
 }
 
 void OBSBasic::EnablePreviewProgram()

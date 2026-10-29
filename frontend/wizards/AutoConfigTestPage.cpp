@@ -1035,9 +1035,14 @@ void AutoConfigTestPage::FinalizeResults()
 		obs_service_update(service, service_settings);
 		obs_service_apply_encoder_settings(service, vencoder_settings, nullptr);
 
+		/* 必须初始化：`obs_service_get_supported_resolutions`（obs-service.c:372）与
+		   `obs_service_get_max_fps`（:389）都是**先过 obs_service_valid 守卫、之后才清出参**，
+		   service 无效时直接早退、一个字节都不回填 ⇒ 下面 `if (maxFPS)` 读的是栈垃圾，
+		   能把垃圾帧率写进 wiz->idealFPSNum 并落进用户配置。`*_get_max_bitrate` 反之（清零在守卫之前），
+		   所以 SimpleOutput/AdvancedOutput 那两调用点不用改。同 OBSBasicSettings_Stream.cpp:1070-1078 的写法。 */
 		BPtr<obs_service_resolution> res_list;
-		size_t res_count;
-		int maxFPS;
+		size_t res_count = 0;
+		int maxFPS = 0;
 		obs_service_get_supported_resolutions(service, &res_list, &res_count);
 		obs_service_get_max_fps(service, &maxFPS);
 

@@ -131,7 +131,7 @@ void OBSBasic::StopStreaming()
 {
 	SaveProject();
 
-	if (outputHandler->StreamingActive()) {
+	if (StreamingActive()) {
 		outputHandler->StopStreaming(streamingStopping);
 	}
 
@@ -173,7 +173,7 @@ void OBSBasic::ForceStopStreaming()
 {
 	SaveProject();
 
-	if (outputHandler->StreamingActive()) {
+	if (StreamingActive()) {
 		outputHandler->StopStreaming(true);
 	}
 
@@ -390,7 +390,7 @@ void OBSBasic::StreamingStop(int code, QString last_error)
 
 void OBSBasic::StreamActionTriggered()
 {
-	if (outputHandler->StreamingActive()) {
+	if (StreamingActive()) {
 		bool confirm = config_get_bool(App()->GetUserConfig(), "BasicWindow", "WarnBeforeStoppingStream");
 
 #ifdef YOUTUBE_ENABLED

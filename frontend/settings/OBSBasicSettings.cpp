@@ -931,6 +931,15 @@ OBSBasicSettings::OBSBasicSettings(QWidget *parent)
 	UpdateAudioWarnings();
 	UpdateAdvNetworkGroup();
 
+#ifdef __ANDROID__
+	/* Android（P-12，与上面 LoadFormats() 的容器裁表同源）：「录制 → 类型 = 自定义输出 (FFmpeg)」整页走
+	 * `ffmpeg_muxer`，那是伴生进程式 muxer（`obs-ffmpeg-mux.c:282` 要 `obs-ffmpeg-mux` 可执行文件），
+	 * 决策 8 在本平台不编 ⇒ P-6④ 实测 0.8 秒静默失败、无文件、UI 无提示；而且选它之后下面换成
+	 * FFmpeg 那套控件（`advOutFFFormat`），连裁过的容器表都会被绕过。配置里残留值的纠正见
+	 * `OBSBasic::InitBasicConfigDefaults()` 里同一条 `#ifdef`。 */
+	ui->advOutRecType->removeItem(1);
+#endif
+
 	ui->audioMsg->setVisible(false);
 	ui->advancedMsg->setVisible(false);
 	ui->advancedMsg2->setVisible(false);
@@ -1090,26 +1099,43 @@ void OBSBasicSettings::LoadFormats()
 
 	ui->advOutFFFormat->blockSignals(false);
 
+	/* Android（P-7 实测 + 决策 7「裁剪归口」）：`SimpleOutput.cpp:248-252` 与 `AdvancedOutput.cpp:112-116`
+	 * 那两处映射一模一样 —— `hybrid_mp4 → mp4_output`、`hybrid_mov → mov_output`、**其余全部**
+	 * `→ ffmpeg_muxer`；而 `ffmpeg_muxer` 在本平台根本没打包（`plugins/obs-ffmpeg/CMakeLists.txt:27-36`
+	 * 的 `if(NOT OS_ANDROID) add_subdirectory(ffmpeg-mux)`）⇒ 选了就是"点录制 → 0.8 秒后静默失败"，
+	 * 只在设备里那份 OBS 日志文件中留一行（实测 mkv 与 flv 两档都是
+	 * `os_process_pipe_write for packet data failed` + `Total frames output: 4`），**UI 上毫无提示**。
+	 * ⇒ 这一族在本平台只有 hybrid 两档能用，别的档不给选。开箱默认本来就是 hybrid_mp4
+	 *   （`OBSBasic.cpp:700-702` 的 `DEFAULT_CONTAINER`），所以这条是"把坑收起来"、不改默认行为。
+	 * 非 hybrid 那几档原样保留在 `#ifndef` 里 ⇒ **桌面端的下拉顺序一字不动**。 */
+#ifndef __ANDROID__
 	ui->simpleOutRecFormat->addItem(FORMAT_STR("FLV"), "flv");
 	ui->simpleOutRecFormat->addItem(FORMAT_STR("MKV"), "mkv");
 	ui->simpleOutRecFormat->addItem(FORMAT_STR("MP4"), "mp4");
 	ui->simpleOutRecFormat->addItem(FORMAT_STR("MOV"), "mov");
+#endif
 	ui->simpleOutRecFormat->addItem(FORMAT_STR("hMP4"), "hybrid_mp4");
 	ui->simpleOutRecFormat->addItem(FORMAT_STR("hMOV"), "hybrid_mov");
+#ifndef __ANDROID__
 	ui->simpleOutRecFormat->addItem(FORMAT_STR("fMP4"), "fragmented_mp4");
 	ui->simpleOutRecFormat->addItem(FORMAT_STR("fMOV"), "fragmented_mov");
 	ui->simpleOutRecFormat->addItem(FORMAT_STR("TS"), "mpegts");
+#endif
 
+#ifndef __ANDROID__
 	ui->advOutRecFormat->addItem(FORMAT_STR("FLV"), "flv");
 	ui->advOutRecFormat->addItem(FORMAT_STR("MKV"), "mkv");
 	ui->advOutRecFormat->addItem(FORMAT_STR("MP4"), "mp4");
 	ui->advOutRecFormat->addItem(FORMAT_STR("MOV"), "mov");
+#endif
 	ui->advOutRecFormat->addItem(FORMAT_STR("hMP4"), "hybrid_mp4");
 	ui->advOutRecFormat->addItem(FORMAT_STR("hMOV"), "hybrid_mov");
+#ifndef __ANDROID__
 	ui->advOutRecFormat->addItem(FORMAT_STR("fMP4"), "fragmented_mp4");
 	ui->advOutRecFormat->addItem(FORMAT_STR("fMOV"), "fragmented_mov");
 	ui->advOutRecFormat->addItem(FORMAT_STR("TS"), "mpegts");
 	ui->advOutRecFormat->addItem(FORMAT_STR("HLS"), "hls");
+#endif
 
 #undef FORMAT_STR
 }
@@ -1788,6 +1814,15 @@ void OBSBasicSettings::LoadSimpleOutputSettings()
 	ui->simpleOutputVBitrate->setValue(videoBitrate);
 
 	int idx = ui->simpleOutRecFormat->findData(format);
+#ifdef __ANDROID__
+	/* 本平台的容器下拉只有 hybrid 两档（见上面 PopulateFormatControls 里的 `#ifndef __ANDROID__`），
+	 * 而配置里可能存着裁掉前写下的 mkv/flv ⇒ findData 返回 -1 ⇒ 下拉框空白，
+	 * 空白又被 SaveComboData 写回配置，录像重新掉进未随包的 ffmpeg_muxer 分支（P-7 实测 0.8 秒静默失败）。
+	 * ⇒ 本机找不到就回落到第一档（hybrid_mp4），顺手把坏配置修回来。桌面端的表没裁，不加这层回落。 */
+	if (idx == -1) {
+		idx = 0;
+	}
+#endif
 	ui->simpleOutRecFormat->setCurrentIndex(idx);
 
 	PopulateSimpleBitrates(ui->simpleOutputABitrate, isOpus);
@@ -2011,6 +2046,12 @@ void OBSBasicSettings::LoadAdvOutputRecordingSettings()
 	ui->advOutMuxCustom->setText(muxCustom);
 
 	idx = ui->advOutRecFormat->findData(format);
+#ifdef __ANDROID__
+	/* 同 simpleOutRecFormat：裁表后旧配置里的非 hybrid 容器会选空，回落第一档。 */
+	if (idx == -1) {
+		idx = 0;
+	}
+#endif
 	ui->advOutRecFormat->setCurrentIndex(idx);
 
 	ui->advOutRecTrack1->setChecked(tracks & (1 << 0));
@@ -4901,7 +4942,14 @@ void OBSBasicSettings::FillSimpleRecordingValues()
 	ADD_QUALITY("Stream");
 	ADD_QUALITY("Small");
 	ADD_QUALITY("HQ");
+#ifndef __ANDROID__
+	/* Lossless 这一档在 Android 上**必坏**：`SimpleOutput::LoadRecordingPreset_Lossless()`
+	 * (`utility/SimpleOutput.cpp:49-58`) 把 `format_name` 硬写成 `avi` —— 不是 hybrid 档 ⇒ 走
+	 * `ffmpeg_muxer` ⇒ 与上面那批被裁掉的容器同一个静默失败。载入侧本来就有护栏
+	 * （`findData(recQual)` 回 -1 时落到 0，见下面的 `simpleOutRecQuality`），所以旧 profile 里
+	 * 存过 Lossless 不会留下空白下拉。 */
 	ADD_QUALITY("Lossless");
+#endif
 
 	ui->simpleOutRecEncoder->addItem(ENCODER_STR("Software"), QString(SIMPLE_ENCODER_X264));
 	ui->simpleOutRecEncoder->addItem(ENCODER_STR("SoftwareLowCPU"), QString(SIMPLE_ENCODER_X264_LOWCPU));
@@ -5311,7 +5359,8 @@ static void DisableIncompatibleSimpleCodecs(QComboBox *cbox, const QString &form
 			codec = encName;
 		} else {
 			const char *encoder_id = get_simple_output_encoder(QT_TO_UTF8(encName));
-			codec = obs_get_encoder_codec(encoder_id);
+			const char *encCodec = encoder_id ? obs_get_encoder_codec(encoder_id) : nullptr;
+			codec = encCodec ? encCodec : "";
 		}
 
 		QStandardItemModel *model = dynamic_cast<QStandardItemModel *>(cbox->model());
@@ -5338,7 +5387,12 @@ static void DisableIncompatibleSimpleContainer(QComboBox *cbox, const QString &c
 {
 	/* Similar to above, but works in reverse to disable incompatible formats
 	 * based on the encoder selection. */
-	string vCodec = obs_get_encoder_codec(get_simple_output_encoder(QT_TO_UTF8(vEncoder)));
+	const char *vEncoderId = get_simple_output_encoder(QT_TO_UTF8(vEncoder));
+	/* vEncoder 为空（下拉框 setup 期间 currentIndex=-1）时 get_simple_output_encoder
+	   返回 NULL；编码器未注册时 obs_get_encoder_codec 返回 NULL，两者都会让
+	   std::string 赋值走到 strlen(NULL) */
+	const char *vCodecCStr = vEncoderId ? obs_get_encoder_codec(vEncoderId) : nullptr;
+	string vCodec = vCodecCStr ? vCodecCStr : "";
 	string aCodec = aEncoder.toStdString();
 
 	bool currentCompatible = true;

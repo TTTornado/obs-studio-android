@@ -98,6 +98,17 @@ OBSProjector::OBSProjector(QWidget *widget, obs_source_t *source_, int monitor, 
 
 	show();
 
+#ifdef __ANDROID__
+	/* "新窗口"投影仪的几何要在 show() 之后补一次才生效：构造函数里那句 resize(480,270) 是在
+	 * show 之前跑的，Android 平台插件会把它丢掉 —— 实测（2026-09-06 19:34，dumpsys activity top 的
+	 * View Hierarchy）那个窗拿到的是 0,0-1600,1000 整屏，且 isMaximized() 为真（投影仪菜单因此
+	 * 少掉"调整窗口以适配内容"那一行）。同一个尺寸在 show 之后设就生效：OpenWindowedProjector()
+	 * 走的是后一条路，实测窗变 0,0-720,405（=480x270 逻辑 × dpr 1.5）、共享面重挂成 720x405。 */
+	if (monitor == -1) {
+		resize(480, 270);
+	}
+#endif
+
 	// We need it here to allow keyboard input in X11 to listen to Escape
 	activateWindow();
 }
@@ -125,8 +136,16 @@ OBSProjector::~OBSProjector()
 void OBSProjector::SetMonitor(int monitor)
 {
 	savedMonitor = monitor;
+#ifdef __ANDROID__
+	/* B-7 甲：Android 上没有"另一台显示器"这回事 —— 实测（plan.md §五 B-7）投影仪只是同一个
+	 * 原生窗里的一个嵌套 QtWindow 子 View，`showFullScreen()` 走的是"把窗口铺满它所在屏"，
+	 * 对这种非主窗未验证过；直接按主屏几何摆，效果一样且少一个变量。 */
+	QScreen *screen = QGuiApplication::primaryScreen();
+	setGeometry(screen->geometry());
+#else
 	setGeometry(QGuiApplication::screens()[monitor]->geometry());
 	showFullScreen();
+#endif
 	SetHideCursor();
 }
 
@@ -289,7 +308,11 @@ void OBSProjector::mousePressEvent(QMouseEvent *event)
 		popup.addAction(alwaysOnTopButton);
 
 		popup.addAction(QTStr("Close"), this, &OBSProjector::EscapeTriggered);
-		popup.exec(QCursor::pos());
+		/* 用这发右键自己的全局坐标，不用 QCursor::pos()：Android 上触摸不更新那个光标缓存、
+		 * setPos 又是空操作（19:03 实测 setPos(533,333) 后 pos() 仍是上一次 tap 的 377,279），
+		 * 菜单会弹到手指之外去 —— 而这个菜单是投影仪唯一能触摸关掉它的入口。
+		 * 桌面端鼠标按下点 == 光标点，语义不变。 */
+		popup.exec(event->globalPosition().toPoint());
 	} else if (event->button() == Qt::LeftButton) {
 		// Only MultiView projectors handle left click
 		if (this->type != ProjectorType::Multiview) {

@@ -426,6 +426,13 @@ private:
 	void copyActionsDynamicProperties();
 	std::optional<QWidget *> createContextBarWidget(obs_source_t *source);
 
+#ifdef __ANDROID__
+	/* P-17-e 主界面一键前后置：翻转当前场景里那颗 android_camera_input 的朝向，
+	 * 以及"场景里有没有这颗源"→ 按钮显隐。实现在 OBSBasic_ContextToolbar.cpp（查场景形状的活儿都在那）。 */
+	void FlipAndroidCamera();
+	void UpdateAndroidFlipCameraButton();
+#endif
+
 private slots:
 	void on_toggleContextBar_toggled(bool visible);
 
@@ -1252,7 +1259,7 @@ public:
 	QMenu *AddBlendingModeMenu(QMenu *menu, obs_sceneitem_t *item);
 	QMenu *AddBackgroundColorMenu(QMenu *menu, QWidgetAction *widgetAction, ColorSelect *select,
 				      obs_sceneitem_t *item);
-	void CreateSourcePopupMenu(int idx, bool preview);
+	void CreateSourcePopupMenu(int idx, bool preview, const QPoint &menuGlobalPos = QPoint(-1, -1));
 
 	void actionOpenSourceFilters();
 	void actionOpenSourceProperties();
@@ -1449,7 +1456,7 @@ private slots:
 	void EnablePreviewProgram();
 	void DisablePreviewProgram();
 
-	void ProgramViewContextMenuRequested();
+	void ProgramViewContextMenuRequested(const QPoint &pos = QPoint(-1, -1));
 
 	void OpenStudioProgramProjector();
 	void OpenStudioProgramWindow();

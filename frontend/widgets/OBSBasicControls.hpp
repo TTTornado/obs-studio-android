@@ -53,6 +53,12 @@ public:
 	OBSBasicControls(OBSBasic *main);
 	inline ~OBSBasicControls() {}
 
+#ifdef __ANDROID__
+	/* P-17-e：主界面那颗"前后置"按钮。父对象就是本控件（跟着 controlsDock 一起没），
+	 * 指针只给 OBSBasic 用来切显隐 —— 当前用哪颗镜头的真相在源的设置里，不在这里。 */
+	QPushButton *androidFlipCameraButton = nullptr;
+#endif
+
 signals:
 	void StreamButtonClicked();
 	void BroadcastButtonClicked();
@@ -64,6 +70,9 @@ signals:
 	void VirtualCamConfigButtonClicked();
 	void StudioModeButtonClicked();
 	void SettingsButtonClicked();
+#ifdef __ANDROID__
+	void FlipCameraButtonClicked();
+#endif
 
 	void StartStreamMenuActionClicked();
 	void StopStreamMenuActionClicked();

@@ -30,7 +30,7 @@
 
 void OBSBasic::ReplayBufferActionTriggered()
 {
-	if (outputHandler->ReplayBufferActive()) {
+	if (ReplayBufferActive()) {
 		StopReplayBuffer();
 	} else {
 		StartReplayBuffer();

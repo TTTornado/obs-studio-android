@@ -105,7 +105,7 @@ void OBSBasic::OnVirtualCamStop(int)
 
 void OBSBasic::VirtualCamActionTriggered()
 {
-	if (outputHandler->VirtualCamActive()) {
+	if (VirtualCamActive()) {
 		StopVirtualCam();
 	} else {
 		if (!UIValidation::NoSourcesConfirmation(this)) {

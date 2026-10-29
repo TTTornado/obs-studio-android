@@ -8,6 +8,10 @@
 #include <QFile>
 #include <QScrollBar>
 
+#ifdef __ANDROID__
+#include <widgets/OBSAndroidPath.hpp> // 3-4：openUrl(本地路径) 的 Android 替代
+#endif
+
 #include "moc_OBSLogViewer.cpp"
 
 OBSLogViewer::OBSLogViewer(QWidget *parent) : QDialog(parent), ui(new Ui::OBSLogViewer)
@@ -125,6 +129,9 @@ void OBSLogViewer::on_openButton_clicked()
 	path += "/";
 	path += log;
 
-	QUrl url = QUrl::fromLocalFile(QT_UTF8(path.c_str()));
-	QDesktopServices::openUrl(url);
+#ifdef __ANDROID__
+	obsAndroidShowLocalPath(this, "打开日志文件", QT_UTF8(path.c_str()));
+#else
+	QDesktopServices::openUrl(QUrl::fromLocalFile(QT_UTF8(path.c_str())));
+#endif
 }

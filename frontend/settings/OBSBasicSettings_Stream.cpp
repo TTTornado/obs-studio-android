@@ -8,6 +8,7 @@
 #include <utility/YoutubeApiWrappers.hpp>
 #endif
 #include <widgets/OBSBasic.hpp>
+#include <widgets/OBSAndroidDisplay.hpp> // P-2 服务列表探针（logcat tag OBS-display）
 
 #include <qt-wrappers.hpp>
 
@@ -99,9 +100,11 @@ void OBSBasicSettings::LoadStream1Settings()
 
 	obs_service_t *service_obj = main->GetService();
 	const char *type = obs_service_get_type(service_obj);
-	bool is_rtmp_custom = (strcmp(type, "rtmp_custom") == 0);
-	bool is_rtmp_common = (strcmp(type, "rtmp_common") == 0);
-	bool is_whip = (strcmp(type, "whip_custom") == 0);
+	/* service_obj 可为 NULL（Android 上 rtmp-services 未打包，InitService 的容忍分支
+	   放行无服务启动），此时 type 也是 NULL；type && 守卫对所有平台无害 */
+	bool is_rtmp_custom = type && (strcmp(type, "rtmp_custom") == 0);
+	bool is_rtmp_common = type && (strcmp(type, "rtmp_common") == 0);
+	bool is_whip = type && (strcmp(type, "whip_custom") == 0);
 
 	loading = true;
 
@@ -508,6 +511,17 @@ void OBSBasicSettings::LoadServices(bool showAll)
 			ui->service->setCurrentIndex(idx);
 		}
 	}
+
+#ifdef __ANDROID__
+	/* 阶段 4 P-2 判据（LoadServices 这一侧）：这条走 logcat，插件里那些 blog() 走 OBS 自己的日志
+	   文件（…/.config/obs-studio/logs/），两边对起来才分得清"下拉为什么空"。02:41 实测：
+	   rtmp_common=0 不是没读到 JSON —— 插件那侧报 JSON 条目=83、协议闸门放行=0，因为注册
+	   RTMP/RTMPS 的是 obs-outputs，它要到 P-5 才进白名单。⇒ 本阶段空列表是预期中间态。 */
+	obsAndroidDisplayLog("P-2 服务列表：showAll=%d rtmp_common=%zu 下拉=%d 当前='%s' 首=%s 末=%s", (int)showAll,
+			     services_count, ui->service->count(), ui->service->currentText().toUtf8().constData(),
+			     services_count ? obs_property_list_item_string(services, 0) : "",
+			     services_count ? obs_property_list_item_string(services, services_count - 1) : "");
+#endif
 
 	ui->service->blockSignals(false);
 }
@@ -1054,10 +1068,14 @@ void OBSBasicSettings::UpdateServiceRecommendations()
 
 	OBSService service = GetStream1Service();
 
-	int vbitrate, abitrate;
+	/* 必须初始化：service 为 NULL 时（Android 上 rtmp-services 未打包、
+	   SpawnTempService 也可能失败返回 NULL），上面三个 obs_service_get_* 会因
+	   obs_service_valid 守卫早退、不回填，未初始化的 res_count 垃圾值会让
+	   下面的 res_list[i] 读到空指针。本文件 UpdateResFPSLimits 已是同样写法。 */
+	int vbitrate = 0, abitrate = 0;
 	BPtr<obs_service_resolution> res_list;
-	size_t res_count;
-	int fps;
+	size_t res_count = 0;
+	int fps = 0;
 
 	obs_service_get_max_bitrate(service, &vbitrate, &abitrate);
 	obs_service_get_supported_resolutions(service, &res_list, &res_count);
@@ -1461,12 +1479,16 @@ bool OBSBasicSettings::ServiceAndVCodecCompatible()
 	const char **codecs = obs_service_get_supported_video_codecs(service);
 
 	if (!codecs || IsCustomService()) {
-		const char *output;
-		char **output_codecs;
+		const char *output = nullptr;
+		char **output_codecs = nullptr;
 
 		obs_enum_output_types_with_protocol(QT_TO_UTF8(protocol), &output, return_first_id);
 
-		output_codecs = strlist_split(obs_get_output_supported_video_codecs(output), ';', false);
+		/* output 可能保持 NULL：未打包 output 插件时枚举函数早退不回填，
+		   直接喂给 obs_get_output_supported_video_codecs 会崩 */
+		if (output) {
+			output_codecs = strlist_split(obs_get_output_supported_video_codecs(output), ';', false);
+		}
 
 		ret = service_supports_codec((const char **)output_codecs, codec);
 
@@ -1496,11 +1518,13 @@ bool OBSBasicSettings::ServiceAndACodecCompatible()
 	const char **codecs = obs_service_get_supported_audio_codecs(service);
 
 	if (!codecs || IsCustomService()) {
-		const char *output;
-		char **output_codecs;
+		const char *output = nullptr;
+		char **output_codecs = nullptr;
 
 		obs_enum_output_types_with_protocol(QT_TO_UTF8(protocol), &output, return_first_id);
-		output_codecs = strlist_split(obs_get_output_supported_audio_codecs(output), ';', false);
+		if (output) {
+			output_codecs = strlist_split(obs_get_output_supported_audio_codecs(output), ';', false);
+		}
 
 		ret = service_supports_codec((const char **)output_codecs, QT_TO_UTF8(codec));
 
@@ -1665,19 +1689,26 @@ void OBSBasicSettings::ResetEncoders(bool streamOnly)
 	size_t idx = 0;
 
 	if (!vcodecs || IsCustomService()) {
-		const char *output;
+		const char *output = nullptr;
 
 		obs_enum_output_types_with_protocol(QT_TO_UTF8(protocol), &output, return_first_id);
-		output_vcodecs = strlist_split(obs_get_output_supported_video_codecs(output), ';', false);
-		vcodecs = (const char **)output_vcodecs.Get();
+		/* output 可能保持 NULL：未打包任何 output 插件时 protocol 未注册，
+		   枚举函数早退不回填；vcodecs 保持 NULL 是安全的
+		   （service_supports_codec(NULL,…) 恒 true） */
+		if (output) {
+			output_vcodecs = strlist_split(obs_get_output_supported_video_codecs(output), ';', false);
+			vcodecs = (const char **)output_vcodecs.Get();
+		}
 	}
 
 	if (!acodecs || IsCustomService()) {
-		const char *output;
+		const char *output = nullptr;
 
 		obs_enum_output_types_with_protocol(QT_TO_UTF8(protocol), &output, return_first_id);
-		output_acodecs = strlist_split(obs_get_output_supported_audio_codecs(output), ';', false);
-		acodecs = (const char **)output_acodecs.Get();
+		if (output) {
+			output_acodecs = strlist_split(obs_get_output_supported_audio_codecs(output), ';', false);
+			acodecs = (const char **)output_acodecs.Get();
+		}
 	}
 
 	QSignalBlocker s1(ui->simpleOutStrEncoder);

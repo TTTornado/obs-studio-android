@@ -21,10 +21,15 @@
 #include "ColorSelect.hpp"
 #include "OBSProjector.hpp"
 
+#ifdef __ANDROID__
+#include "OBSAndroidDisplay.hpp" // 3-4 长按→右键探针（logcat tag OBS-display）
+#endif
+
 #include <components/VolumeControl.hpp>
 #include <dialogs/NameDialog.hpp>
 #include <dialogs/OBSBasicAdvAudio.hpp>
 #include <dialogs/OBSBasicSourceSelect.hpp>
+#include <utility/AndroidMenuPos.hpp>
 #include <utility/item-widget-helpers.hpp>
 
 #include <qt-wrappers.hpp>
@@ -569,7 +574,7 @@ QMenu *OBSBasic::AddBackgroundColorMenu(QMenu *menu, QWidgetAction *widgetAction
 	return menu;
 }
 
-void OBSBasic::CreateSourcePopupMenu(int idx, bool preview)
+void OBSBasic::CreateSourcePopupMenu(int idx, bool preview, const QPoint &menuGlobalPos)
 {
 	QMenu popup(this);
 	delete previewProjectorSource;
@@ -761,7 +766,15 @@ void OBSBasic::CreateSourcePopupMenu(int idx, bool preview)
 		popup.addAction(ui->actionPasteDup);
 	}
 
-	popup.exec(QCursor::pos());
+	const QPoint menuPos = OBSMenuPos(menuGlobalPos);
+#ifdef __ANDROID__
+	obsAndroidDisplayLog("3-4 长按→右键：菜单 %d 项，exec 起于全局(%d,%d)", int(popup.actions().size()), menuPos.x(),
+			     menuPos.y());
+#endif
+	popup.exec(menuPos);
+#ifdef __ANDROID__
+	obsAndroidDisplayLog("3-4 长按→右键：菜单 exec 已返回");
+#endif
 }
 
 void OBSBasic::actionOpenSourceFilters()
@@ -790,9 +803,16 @@ void OBSBasic::actionOpenSourceProperties()
 
 void OBSBasic::on_sources_customContextMenuRequested(const QPoint &pos)
 {
+#ifdef __ANDROID__
+	/* 长按→右键断在哪一格，这条就是分界线：打了 = 信号确实连到了 OBSBasic；不打 =
+	 * customContextMenuRequested 没人接（.ui 里的对象名和 on_sources_… 是自动按名字配的，
+	 * 改过名字就静默断线）。 */
+	obsAndroidDisplayLog("3-4 长按→右键：handler 收到 sources 信号 pos=(%d,%d) 场景数=%d 命中行=%d", pos.x(),
+			     pos.y(), int(ui->scenes->count()), int(ui->sources->indexAt(pos).row()));
+#endif
 	if (ui->scenes->count()) {
 		QModelIndex idx = ui->sources->indexAt(pos);
-		CreateSourcePopupMenu(idx.row(), false);
+		CreateSourcePopupMenu(idx.row(), false, ui->sources->viewport()->mapToGlobal(pos));
 	}
 }
 

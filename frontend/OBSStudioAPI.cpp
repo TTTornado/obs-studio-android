@@ -401,6 +401,10 @@ void OBSStudioAPI::obs_frontend_remove_event_callback(obs_frontend_event_cb call
 
 obs_output_t *OBSStudioAPI::obs_frontend_get_streaming_output()
 {
+	if (!main->outputHandler) {
+		return nullptr;
+	}
+
 	auto multitrackVideo = main->outputHandler->multitrackVideo.get();
 	auto mtvOutput = multitrackVideo ? obs_output_get_ref(multitrackVideo->StreamingOutput()) : nullptr;
 	if (mtvOutput) {
@@ -413,12 +417,20 @@ obs_output_t *OBSStudioAPI::obs_frontend_get_streaming_output()
 
 obs_output_t *OBSStudioAPI::obs_frontend_get_recording_output()
 {
+	if (!main->outputHandler) {
+		return nullptr;
+	}
+
 	OBSOutput out = main->outputHandler->fileOutput.Get();
 	return obs_output_get_ref(out);
 }
 
 obs_output_t *OBSStudioAPI::obs_frontend_get_replay_buffer_output()
 {
+	if (!main->outputHandler) {
+		return nullptr;
+	}
+
 	OBSOutput out = main->outputHandler->replayBuffer.Get();
 	return obs_output_get_ref(out);
 }
@@ -595,6 +607,10 @@ void OBSStudioAPI::obs_frontend_take_source_screenshot(obs_source_t *source)
 
 obs_output_t *OBSStudioAPI::obs_frontend_get_virtualcam_output()
 {
+	if (!main->outputHandler) {
+		return nullptr;
+	}
+
 	OBSOutput output = main->outputHandler->virtualCam.Get();
 	return obs_output_get_ref(output);
 }
@@ -658,6 +674,10 @@ bool OBSStudioAPI::obs_frontend_is_theme_dark()
 
 char *OBSStudioAPI::obs_frontend_get_last_recording()
 {
+	if (!main->outputHandler) {
+		return nullptr;
+	}
+
 	return bstrdup(main->outputHandler->lastRecordingPath.c_str());
 }
 

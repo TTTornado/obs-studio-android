@@ -33,6 +33,10 @@
 
 #include <qt-wrappers.hpp>
 
+#ifdef __ANDROID__
+#include "OBSBasicControls.hpp" // P-17-e：主界面那颗前后置按钮挂在 controlsDock 里
+#endif
+
 void OBSBasic::copyActionsDynamicProperties()
 {
 	// Themes need the QAction dynamic properties
@@ -206,6 +210,12 @@ void OBSBasic::UpdateContextBar(bool force)
 {
 	SourceToolBarActionsSetEnabled();
 
+#ifdef __ANDROID__
+	/* 刻意放在下面那道 contextContainer 可见性闸门之前：前后置按钮跟"上下文工具条显示不显示"无关，
+	 * 只跟"当前场景里有没有相机源"有关。 */
+	UpdateAndroidFlipCameraButton();
+#endif
+
 	if (!ui->contextContainer->isVisible() && !force) {
 		return;
 	}
@@ -303,3 +313,79 @@ void OBSBasic::on_toggleContextBar_toggled(bool visible)
 	this->ui->contextContainer->setVisible(visible);
 	UpdateContextBar(true);
 }
+
+#ifdef __ANDROID__
+/* ==== P-17-e 主界面一键前后置 ====
+ * 三个事实决定这段的形状：
+ *  1) 源 id 是 plugins/android-camera/camera2-input.c 里 obs_source_info.id = "android_camera_input"
+ *     （unversioned 同名）。
+ *  2) 朝向存在源设置的 "facing"，取值就是 NDK 的 ACAMERA_LENS_FACING_*（前置 0 / 后置 1 / 外接 2，
+ *     构建用的 NDK 30.0.16138531 里 camera/NdkCameraMetadataTags.h 的 enum acamera_lens_facing_t）。
+ *     前端 include 不到那颗 NDK 头，所以这里只能落数字 —— 换 NDK 版本时这两个常量要跟。
+ *  3) 插件挑相机是"显式 camera_id 优先，其次按 facing"（camera2-input.c:575 的 choose_camera()：
+ *     :584 比 id、:596 比朝向、:603 才报警退回第一台），所以翻朝向必须同时把 camera_id 清回自动，
+ *     否则在属性面板里点过具体那台的人按了没反应。 */
+
+static const char *const ANDROID_CAMERA_ID = "android_camera_input";
+static const long long ANDROID_FACING_FRONT = 0;
+static const long long ANDROID_FACING_BACK = 1;
+
+static bool enumAndroidCamera(obs_scene_t *, obs_sceneitem_t *item, void *param)
+{
+	obs_source_t **out = static_cast<obs_source_t **>(param);
+	obs_source_t *src = obs_sceneitem_get_source(item);
+	if (!*out && src && strcmp(obs_source_get_unversioned_id(src), ANDROID_CAMERA_ID) == 0)
+		*out = obs_source_get_ref(src); /* sceneitem 给的是借用指针，这里要自带一份 */
+	return true;
+}
+
+/* 当前场景顶层的第一颗相机源，自带引用（调用方 release）；没有则 nullptr。
+ * 只看顶层不下钻进分组：源被收进分组后，这颗按钮翻的是主界面上看不见的东西，不如不出现。 */
+static obs_source_t *firstAndroidCamera(OBSScene scene)
+{
+	obs_source_t *found = nullptr;
+	if (scene)
+		obs_scene_enum_items(scene, enumAndroidCamera, &found);
+	return found;
+}
+
+void OBSBasic::UpdateAndroidFlipCameraButton()
+{
+	OBSBasicControls *controls =
+		controlsDock ? qobject_cast<OBSBasicControls *>(controlsDock->widget()) : nullptr;
+	if (!controls || !controls->androidFlipCameraButton)
+		return;
+
+	OBSSourceAutoRelease cam = firstAndroidCamera(GetCurrentScene());
+	controls->androidFlipCameraButton->setVisible(cam != nullptr);
+}
+
+void OBSBasic::FlipAndroidCamera()
+{
+	OBSSourceAutoRelease cam = firstAndroidCamera(GetCurrentScene());
+	if (!cam) {
+		blog(LOG_WARNING, "android-camera: 一键前后置点了，但当前场景里没有相机源");
+		return;
+	}
+
+	obs_data_t *s = obs_source_get_settings(cam);
+	const long long cur = obs_data_get_int(s, "facing");
+	/* 只有"确实是前置"才翻到后置；-1（自动档）和 2（外接）一律翻向前置 —— 自动档实际开成的多半是
+	 * 后置那颗，翻向前置才有肉眼看得见的变化，否则按一下没反应会被当成按钮坏了。 */
+	const long long next = (cur == ANDROID_FACING_FRONT) ? ANDROID_FACING_BACK : ANDROID_FACING_FRONT;
+
+	obs_data_set_string(s, "camera_id", "");
+	obs_data_set_int(s, "facing", next);
+	obs_source_update(cam, s);
+	obs_data_release(s);
+
+	blog(LOG_INFO, "android-camera: 一键前后置 —— 源 '%s' 朝向 %lld → %lld（0=前置 1=后置 2=外接 -1=自动）",
+	     obs_source_get_name(cam), cur, next);
+
+	/* 按钮上刻意不显示"现在是前还是后"：facing 只是"想要哪一面"，真正开成哪颗要等视频线程跑完
+	 * update、由插件在 open_capture_locked 里把实况回写进同一份设置。显示一个会滞后一拍的中间态，
+	 * 不如只显示动作。 */
+	SaveProject();
+}
+#endif
+

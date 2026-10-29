@@ -19,6 +19,7 @@
 
 #include <components/MenuCheckBox.hpp>
 #include <dialogs/NameDialog.hpp>
+#include <utility/AndroidMenuPos.hpp>
 #include <utility/item-widget-helpers.hpp>
 #include <widgets/OBSBasic.hpp>
 
@@ -870,7 +871,10 @@ void AudioMixer::createMixerContextMenu()
 void AudioMixer::showMixerContextMenu()
 {
 	createMixerContextMenu();
-	mixerMenu->popup(QCursor::pos());
+	/* 这个 popup 有两个触发入口（h/v 两个滚动区的 customContextMenuRequested，以及 mixerDock
+	 * 那个），各自给的 pos 处于不同的坐标空间 ⇒ 不 thread 事件坐标，一律按"发出信号的控件"下缘
+	 * 锚定。Android 上非要用 QCursor::pos() 不可的话会弹到上一次触摸位（见 AndroidMenuPos.hpp）。 */
+	mixerMenu->popup(OBSMenuPos(OBSMenuPosBelow(qobject_cast<QWidget *>(sender()))));
 }
 
 void AudioMixer::addControlForUuid(QString uuid)

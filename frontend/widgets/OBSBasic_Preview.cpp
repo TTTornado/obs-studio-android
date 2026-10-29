@@ -19,6 +19,7 @@
 
 #include "OBSBasic.hpp"
 
+#include <utility/AndroidMenuPos.hpp>
 #include <utility/display-helpers.hpp>
 #include <widgets/OBSProjector.hpp>
 
@@ -241,7 +242,7 @@ void OBSBasic::ResizePreview(uint32_t cx, uint32_t cy)
 
 void OBSBasic::on_preview_customContextMenuRequested()
 {
-	CreateSourcePopupMenu(GetTopSelectedSourceItem(), true);
+	CreateSourcePopupMenu(GetTopSelectedSourceItem(), true, OBSMenuPosCenter(ui->preview));
 }
 
 void OBSBasic::on_previewDisabledWidget_customContextMenuRequested()
@@ -259,7 +260,7 @@ void OBSBasic::on_previewDisabledWidget_customContextMenuRequested()
 	previewProjectorMain->addAction(QTStr("Projector.Window"), this, &OBSBasic::OpenPreviewWindow);
 
 	popup.addMenu(previewProjectorMain);
-	popup.exec(QCursor::pos());
+	popup.exec(OBSMenuPos(OBSMenuPosCenter(ui->previewDisabledWidget)));
 }
 
 void OBSBasic::EnablePreviewDisplay(bool enable)

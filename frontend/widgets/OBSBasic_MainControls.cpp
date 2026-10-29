@@ -47,6 +47,10 @@
 
 #include <qt-wrappers.hpp>
 
+#ifdef __ANDROID__
+#include "OBSAndroidPath.hpp" // 3-4：openUrl(本地路径) 的 Android 替代
+#endif
+
 #include <nlohmann/json.hpp>
 #include <QDesktopServices>
 
@@ -315,8 +319,11 @@ void OBSBasic::on_actionShowLogs_triggered()
 		return;
 	}
 
-	QUrl url = QUrl::fromLocalFile(QT_UTF8(logDir));
-	QDesktopServices::openUrl(url);
+#ifdef __ANDROID__
+	obsAndroidShowLocalPath(this, "打开日志文件夹", QT_UTF8(logDir));
+#else
+	QDesktopServices::openUrl(QUrl::fromLocalFile(QT_UTF8(logDir)));
+#endif
 }
 
 void OBSBasic::on_actionUploadCurrentLog_triggered()
@@ -465,7 +472,11 @@ void OBSBasic::on_actionShowSettingsFolder_triggered()
 	const std::string userConfigPath = App()->userConfigLocation.u8string() + "/obs-studio";
 	const QString userConfigLocation = QString::fromStdString(userConfigPath);
 
+#ifdef __ANDROID__
+	obsAndroidShowLocalPath(this, "打开设置文件夹", userConfigLocation);
+#else
 	QDesktopServices::openUrl(QUrl::fromLocalFile(userConfigLocation));
+#endif
 }
 
 void OBSBasic::on_actionShowProfileFolder_triggered()
@@ -474,7 +485,11 @@ void OBSBasic::on_actionShowProfileFolder_triggered()
 		const OBSProfile &currentProfile = GetCurrentProfile();
 		QString currentProfileLocation = QString::fromStdString(currentProfile.path.u8string());
 
+#ifdef __ANDROID__
+		obsAndroidShowLocalPath(this, "打开配置文件文件夹", currentProfileLocation);
+#else
 		QDesktopServices::openUrl(QUrl::fromLocalFile(currentProfileLocation));
+#endif
 	} catch (const std::invalid_argument &error) {
 		blog(LOG_ERROR, "%s", error.what());
 	}

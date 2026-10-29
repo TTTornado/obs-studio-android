@@ -141,6 +141,13 @@ void OBSBasic::DeleteProjector(OBSProjector *projector)
 {
 	for (size_t i = 0; i < projectors.size(); i++) {
 		if (projectors[i] == projector) {
+#ifdef __ANDROID__
+			/* 先藏再删。投影仪是**带着可见状态**被析构的，~QWidget 收尾会 QWindow::close()
+			 * → QPlatformWindow::setVisible(false) → flushWindowSystemEvents，把还在途的那次
+			 * ESCAPE 按键投给一个正在析构的接收者 → SIGSEGV（58 版实测 18:40:23.968，
+			 * fault addr 0x8 / rdi=0）。对话框不崩，是因为 QDialog::done() 本来就 hide 在前。 */
+			projectors[i]->hide();
+#endif
 			projectors[i]->deleteLater();
 			projectors.erase(projectors.begin() + i);
 			break;

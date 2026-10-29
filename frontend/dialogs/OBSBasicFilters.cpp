@@ -20,6 +20,7 @@
 #include <components/VisibilityItemDelegate.hpp>
 #include <components/VisibilityItemWidget.hpp>
 #include <dialogs/NameDialog.hpp>
+#include <utility/AndroidMenuPos.hpp>
 #include <utility/display-helpers.hpp>
 #include <utility/item-widget-helpers.hpp>
 #include <widgets/OBSBasic.hpp>
@@ -27,7 +28,9 @@
 #include <properties-view.hpp>
 #include <qt-wrappers.hpp>
 
+#include <QApplication>
 #include <QLineEdit>
+#include <QStyle>
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -611,6 +614,20 @@ void OBSBasicFilters::closeEvent(QCloseEvent *event)
 	main->SaveProject();
 }
 
+void OBSBasicFilters::showEvent(QShowEvent *event)
+{
+	QDialog::showEvent(event);
+
+	/* 设计高 726 逻辑 px 高于 16:10 横屏的可用高（设备上 667 再减系统栏），
+	 * 底部那条含 addEffectFilter("+") 的工具条和关闭按钮全落在屏外。
+	 * 收高度的做法与 OBSBasicSettings::showEvent 一致，桌面大屏上条件不成立。 */
+	const int titleBarHeight = QApplication::style()->pixelMetric(QStyle::PM_TitleBarHeight);
+	const int maxHeight = round(screen()->availableGeometry().height() - titleBarHeight);
+	if (size().height() >= maxHeight) {
+		resize(size().width(), maxHeight);
+	}
+}
+
 bool OBSBasicFilters::nativeEvent(const QByteArray &, void *message, qintptr *)
 {
 #ifdef _WIN32
@@ -726,7 +743,7 @@ void OBSBasicFilters::on_addAsyncFilter_clicked()
 	ui->asyncFilters->setFocus();
 	QScopedPointer<QMenu> popup(CreateAddFilterPopupMenu(true));
 	if (popup) {
-		popup->exec(QCursor::pos());
+		popup->exec(OBSMenuPos(OBSMenuPosBelow(ui->addAsyncFilter)));
 	}
 }
 
@@ -772,7 +789,7 @@ void OBSBasicFilters::on_addEffectFilter_clicked()
 	ui->effectFilters->setFocus();
 	QScopedPointer<QMenu> popup(CreateAddFilterPopupMenu(false));
 	if (popup) {
-		popup->exec(QCursor::pos());
+		popup->exec(OBSMenuPos(OBSMenuPosBelow(ui->addEffectFilter)));
 	}
 }
 
@@ -887,7 +904,7 @@ void OBSBasicFilters::CustomContextMenu(const QPoint &pos, bool async)
 	ui->asyncWidget->addAction(pasteAction);
 	popup.addAction(pasteAction);
 
-	popup.exec(QCursor::pos());
+	popup.exec(OBSMenuPos(list->viewport()->mapToGlobal(pos)));
 }
 
 void OBSBasicFilters::EditItem(QListWidgetItem *item, bool async)

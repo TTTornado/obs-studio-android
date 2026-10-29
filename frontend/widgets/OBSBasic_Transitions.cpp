@@ -17,10 +17,15 @@
 
 #include "OBSBasic.hpp"
 
+#ifdef __ANDROID__
+#include "OBSAndroidDisplay.hpp" // P-1 默认转场建成探针（logcat tag OBS-display）
+#endif
+
 #include <algorithm>
 
 #include <components/MenuButton.hpp>
 #include <dialogs/NameDialog.hpp>
+#include <utility/AndroidMenuPos.hpp>
 #include <utility/display-helpers.hpp>
 #include <utility/QuickTransition.hpp>
 
@@ -92,6 +97,8 @@ void OBSBasic::InitDefaultTransitions()
 	}
 
 	UpdateCurrentTransition(transitionUuids.back(), true);
+	obsAndroidDisplayLog("P-1 默认转场建成 %d 个（fade=%d cut=%d）", int(transitionUuids.size()),
+			     fadeTransition ? 1 : 0, cutTransition ? 1 : 0);
 }
 
 void OBSBasic::AddQuickTransitionHotkey(QuickTransition *qt)
@@ -172,6 +179,10 @@ void OBSBasic::CreateDefaultQuickTransitions()
 	quickTransitions.emplace_back(cutTransition, 300, quickTransitionIdCounter++);
 	quickTransitions.emplace_back(fadeTransition, 300, quickTransitionIdCounter++);
 	quickTransitions.emplace_back(fadeTransition, 300, quickTransitionIdCounter++, true);
+#ifdef __ANDROID__
+	/* P-3 回退判据：Android 曾因"obs-transitions 没进包"整段跳过，恢复后这里恒为 3 条。 */
+	obsAndroidDisplayLog("P-3 默认快捷转场 %d 条", int(quickTransitions.size()));
+#endif
 }
 
 void OBSBasic::LoadQuickTransitions(obs_data_array_t *array)
@@ -534,7 +545,7 @@ void OBSBasic::on_transitionAdd_clicked()
 	}
 
 	if (foundConfigurableTransitions) {
-		menu.exec(QCursor::pos());
+		menu.exec(OBSMenuPos(OBSMenuPosBelow(ui->transitionAdd)));
 	}
 }
 
@@ -654,7 +665,7 @@ void OBSBasic::on_transitionProps_clicked()
 	connect(action, &QAction::triggered, this, properties);
 	menu.addAction(action);
 
-	menu.exec(QCursor::pos());
+	menu.exec(OBSMenuPos(OBSMenuPosBelow(ui->transitionProps)));
 }
 
 QuickTransition *OBSBasic::GetQuickTransition(int id)
@@ -1482,7 +1493,15 @@ void OBSBasic::LoadTransitions(obs_data_array_t *transitionsData, obs_load_sourc
 		}
 	}
 
-	UpdateCurrentTransition(transitionUuids.back(), true);
+	/* transitionUuids 可能为空：Android 上 obs-transitions 要到阶段 4 才进包，默认转场
+	   从未建立（见 InitDefaultTransitions 的同源裁剪），此时一份先前存过盘的场次集合
+	   重新载入会走到这里，而 .back() 对空 vector 是 UB —— 实测崩在 UpdateCurrentTransition
+	   里 transitions.find(脏字符串)（SIGSEGV，qtMainLoopThrea，backtrace LoadTransitions→
+	   UpdateCurrentTransition）。桌面端永远有 cut/fade 兜底不会为空，这个守卫对它是 no-op。
+	   阶段 4 打包 obs-transitions 后可连同各处裁剪一起复核。 */
+	if (!transitionUuids.empty()) {
+		UpdateCurrentTransition(transitionUuids.back(), true);
+	}
 }
 
 OBSSource OBSBasic::GetOverrideTransition(OBSSource source)

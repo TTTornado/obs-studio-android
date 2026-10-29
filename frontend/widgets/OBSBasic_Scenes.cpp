@@ -21,6 +21,7 @@
 #include "OBSProjector.hpp"
 
 #include <dialogs/NameDialog.hpp>
+#include <utility/AndroidMenuPos.hpp>
 
 #include <qt-wrappers.hpp>
 
@@ -632,7 +633,7 @@ void OBSBasic::on_scenes_customContextMenuRequested(const QPoint &pos)
 	connect(gridAction, &QAction::triggered, this, &OBSBasic::GridActionClicked);
 	popup.addAction(gridAction);
 
-	popup.exec(QCursor::pos());
+	popup.exec(OBSMenuPos(ui->scenes->viewport()->mapToGlobal(pos)));
 }
 
 void OBSBasic::on_actionSceneListMode_triggered()
