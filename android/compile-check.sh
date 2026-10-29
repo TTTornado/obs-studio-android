@@ -45,7 +45,20 @@ echo "NDK   = $NDK"
 echo "DEPS  = $DEPS"
 echo "BUILD = $BUILD"
 echo "ABI   = $ABI   API=$API   JOBS=$JOBS   TYPE=$BUILD_TYPE"
+echo "OBS_VERSION_OVERRIDE = ${OBS_VERSION_OVERRIDE:-(未设置)}"
 echo "=================================================="
+
+# OBS 的 CMake 用 `git describe --always --tags` 推版本号
+# （cmake/common/versionconfig.cmake:9-24）。CI 里 actions/checkout 默认只取
+# 1 个 commit、不带 tag，describe 只能返回裸 SHA（如 54453df），
+# 正则匹配不到 x.y.z，于是 list(GET _obs_version_canonical 1 ...) 越界，
+# project() 拿到非法 VERSION 直接失败。
+#
+# versionconfig.cmake:9 的条件是
+#   if(NOT DEFINED OBS_VERSION_OVERRIDE AND EXISTS "${...}/.git")
+# 所以显式定义 OBS_VERSION_OVERRIDE 会把整段 git 逻辑跳过。
+# 升级上游基线时记得同步这个值。
+OBS_VERSION_OVERRIDE="${OBS_VERSION_OVERRIDE:-33.0.0}"
 
 EXTRA_SDK=()
 if [ -n "${ANDROID_SDK_ROOT:-}" ]; then
@@ -60,6 +73,7 @@ cmake -S "$ROOT" -B "$BUILD" -G Ninja \
   -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
   -DCMAKE_PREFIX_PATH="$DEPS" \
   -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
+  -DOBS_VERSION_OVERRIDE="$OBS_VERSION_OVERRIDE" \
   -DENABLE_FRONTEND=OFF \
   -DENABLE_SCRIPTING=OFF \
   -DENABLE_HEVC=ON \

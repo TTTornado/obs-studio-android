@@ -49,6 +49,10 @@ env:
   NDK_VERSION: '30.0.16138531'
   ABI: arm64-v8a
   API: '29'
+  # checkout 默认不取 tag，git describe 只能返回裸 SHA，会让
+  # cmake/common/versionconfig.cmake 的版本解析失败。显式给定版本可绕过。
+  # 升级上游基线时同步改这里（同时改 android/compile-check.sh 的默认值）。
+  OBS_VERSION_OVERRIDE: '33.0.0'
 
 jobs:
   compile:
@@ -96,13 +100,13 @@ jobs:
           fi
           echo "NDK_ROOT=$SDK/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
 
-      - name: 缓存依赖产物
+      - name: 恢复依赖缓存
         id: deps-cache
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: |
             android/deps-android/prebuilt
-            ${{ env.HOME }}/deps-work/state
+            ~/deps-work/state
           key: deps-${{ env.ABI }}-${{ hashFiles('android/deps-android/versions.sh', 'android/deps-android/defs.sh') }}
           restore-keys: |
             deps-${{ env.ABI }}-
@@ -117,6 +121,18 @@ jobs:
         env:
           NDK: ${{ env.NDK_ROOT }}
           JOBS: 4
+
+      # 用 cache/save 显式保存，而不是依赖 actions/cache 的 post 步骤：
+      # post 步骤在 job 失败时会被跳过（首次运行就是 skipped），
+      # 那样后面编译一失败就得重编 30 分钟的依赖。
+      - name: 保存依赖缓存
+        if: always() && steps.deps-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            android/deps-android/prebuilt
+            ~/deps-work/state
+          key: deps-${{ env.ABI }}-${{ hashFiles('android/deps-android/versions.sh', 'android/deps-android/defs.sh') }}
 
       - name: 磁盘实况（依赖构建后）
         run: |
