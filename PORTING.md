@@ -144,6 +144,54 @@ frontend/plugin-manager/InstalledPluginRow.cpp:111: error: no matching member fu
 而我们那套触屏适配（`devicePixelRatioF` 坐标映射、QSS 注入 `min-height: 48px`）
 恰恰依赖这些——**真机上要专门看一眼布局有没有走样**。
 
+> 曾经有个 `qt-probe` job 专门查这件事，结论已定（公开镜像最高 6.7.3），已移除。
+> 以后想复查 Qt 6.8/6.9 有没有上镜像，跑一条命令即可：
+>
+> ```bash
+> pip install aqtinstall && aqt list-qt linux android
+> ```
+
+---
+
+## APK 打包的坑（Qt 6.7.3 的 Gradle 工具链太旧）
+
+Qt 6.7.3 自带 **AGP 7.4.1**（官方只测到 compileSdk 33），和这台 CI 镜像上的
+Android SDK 平台不兼容。两处踩坑：
+
+**1. `androiddeployqt` 自己挑平台，不认 `QT_ANDROID_COMPILE_SDK_VERSION`**
+
+deployment settings 里根本没有 `android-platform` 字段，Qt 扫 SDK 目录自己挑，
+而且偏好 `*-ext*` 变体（实测依次挑到 `android-36-ext19` → `android-34-ext12`）。
+所以 workflow 里先把 36.x / 35-ext* / 34-ext* 卸掉，只留 `android-35`（= targetSdk）。
+
+**2. AGP 7.4.1 捆绑的 aapt2 读不了新版 `android.jar`**
+
+换哪个平台都报同一句：
+
+```
+aapt2 E LoadedArsc.cpp:94] RES_TABLE_TYPE_TYPE entry offsets overlap actual entry data.
+aapt2 E ApkAssets.cpp:149] Failed to load resources table in APK '.../android-35/android.jar'
+> Task :processReleaseResources FAILED
+```
+
+对策是用 build-tools 里的新版 aapt2 顶替（AGP 支持该覆盖项）：
+
+```bash
+echo "android.aapt2FromMavenOverride=$ANDROID_SDK_ROOT/build-tools/<ver>/aapt2" \
+  >> ~/.gradle/gradle.properties
+```
+
+**必须写在用户级** `~/.gradle/gradle.properties` —— `androiddeployqt` 每次都会重写
+工程级那份，工程级的改动会被覆盖。
+
+**3. 不要删 `android-build` 目录再重打包**
+
+Qt 的 CMake 已经把 `androiddeployqt` 挂成了构建目标（`[450/451] Creating APK for
+obs-studio`），但那一刻插件 `.so` 还没暂存，所以那次出的包**不含插件**。
+需要重打包一次带上插件；而重打包时 `android-build/libs/<abi>/libobs_arm64_v8a.so`
+必须还在，删目录就会报 `Cannot find application binary`。
+正确做法：保留目录、只换插件并清 Gradle 的 native 中间件（见 `android/build-apk.sh`）。
+
 ---
 
 ## 待办清单

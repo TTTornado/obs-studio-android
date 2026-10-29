@@ -201,49 +201,9 @@ jobs:
         if: always()
         run: df -h /
 
-  qt-probe:
-    name: Qt 可用性探测
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    # 只用来回答一个问题：Qt 6.9.3 的 android_arm64_v8a 到底能不能匿名下载。
-    # 不阻塞主构建，失败也不影响编译验证的结论。
-    continue-on-error: true
-
-    steps:
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: 安装 aqtinstall
-        run: pip install --quiet aqtinstall
-
-      - name: 列出可用的 Android Qt 版本
-        run: |
-          echo "::group::aqt list-qt linux android"
-          aqt list-qt linux android || echo "(命令失败)"
-          echo "::endgroup::"
-
-      - name: 探测 6.9.3 的架构与模块
-        run: |
-          for v in 6.9.3 6.8.0 6.7.3; do
-            echo "::group::$v"
-            aqt list-qt linux android --arch "$v" || echo "  无此版本或查询失败"
-            echo "::endgroup::"
-          done
-
-      - name: 探测 desktop 宿主套件（androiddeployqt 来源）
-        run: |
-          echo "::group::aqt list-qt linux desktop --arch 6.9.3"
-          aqt list-qt linux desktop --arch 6.9.3 || echo "  无此版本或查询失败"
-          echo "::endgroup::"
-
-      - name: 结论
-        run: |
-          echo "把上面的输出贴回会话，即可确定 Qt 版本策略。"
-
   # 阶段 2：打可安装的 APK。
   #
-  # 用 Qt 6.7.3（公开镜像上 Android 套件的最新版本；6.8/6.9 拿不到，见 qt-probe job）。
+  # 用 Qt 6.7.3（公开镜像上 Android 套件的最新版本；6.8/6.9 拿不到）。
   # 实测 OBS 33.0 前端对 Qt 6.9 的**编译期**硬依赖只有 1 行
   # （InstalledPluginRow.cpp 的 QString::arg(std::string_view)），已在源码里做了兼容，
   # 所以 6.7.3 足够出包。
@@ -340,6 +300,30 @@ jobs:
           echo "::group::安装结果"
           ls -1 "${QT_ROOT}/${QT_VERSION}"
           echo "::endgroup::"
+
+      # Qt 6.7.3 自带 AGP 7.4.1，它捆绑的 aapt2 读不了新版平台 android.jar 的
+      # resources table（换哪个平台都一样，实测 android-36-ext19 与 android-35 都报）：
+      #
+      #   aapt2 E LoadedArsc.cpp:94] RES_TABLE_TYPE_TYPE entry offsets overlap actual entry data.
+      #   aapt2 E ApkAssets.cpp:149] Failed to load resources table in APK '.../android-35/android.jar'
+      #   > Task :processReleaseResources FAILED
+      #
+      # AGP 支持用 android.aapt2FromMavenOverride 指定外部 aapt2，于是拿 build-tools
+      # 里的新版 aapt2 顶替它。
+      # 必须写在**用户级** gradle.properties：androiddeployqt 每次都会重写工程级那份，
+      # 工程级的改动会被覆盖掉。
+      - name: 用新版 aapt2 顶替 AGP 7.4.1 自带的
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
+          AAPT2="$(ls "$SDK"/build-tools/*/aapt2 2>/dev/null | sort -V | tail -1)"
+          [ -n "$AAPT2" ] || { echo "::error::找不到 aapt2"; exit 1; }
+          echo "使用 aapt2: $AAPT2"
+          "$AAPT2" version 2>&1 | sed 's/^/  /' || true
+          mkdir -p "$HOME/.gradle"
+          echo "android.aapt2FromMavenOverride=$AAPT2" >> "$HOME/.gradle/gradle.properties"
+          echo "---- ~/.gradle/gradle.properties ----"
+          cat "$HOME/.gradle/gradle.properties"
 
       - name: 构建 + 打包 + 签名
         run: |
