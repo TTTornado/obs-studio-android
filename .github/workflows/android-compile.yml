@@ -12,9 +12,10 @@ name: Android compile check
 #   * APK 打包 / 签名 —— 那是下一步
 #   * 真机行为 —— 相机、UVC、MediaProjection、AAudio、推流都无法在 CI 验证
 #
-# 磁盘：默认 runner 根分区只有 ~14 GB，而构建需要 20–35 GB（不含 Qt），
-# 因此必须先用 free-disk-space 清理。保留 Android SDK（android: false），
-# 因为下面要用 sdkmanager 装指定版本的 NDK。
+# 磁盘：实测 ubuntu-24.04 runner 的根分区是 145 GB 总量 / 约 86 GB 可用
+# （见本 workflow 首个 df 步骤的实际输出），而本 workflow 需要 20–35 GB，
+# 因此**不需要**任何腾空间的 action。早前"14 GB 不够用"的判断是基于过时的
+# runner 规格文档，已被实测推翻。df 步骤保留，仅用于观测。
 
 on:
   workflow_dispatch:
@@ -58,24 +59,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 磁盘实况（清理前）
-        run: |
-          echo "::group::df -h"
-          df -h / /mnt 2>/dev/null || df -h
-          echo "::endgroup::"
-
-      - name: 腾出磁盘空间
-        uses: jlumbroso/free-disk-space@main
-        with:
-          tool-cache: true
-          android: false        # 保留 SDK：下面要用 sdkmanager
-          dotnet: true
-          haskell: true
-          large-packages: true
-          docker-images: true
-          swap-storage: true
-
-      - name: 磁盘实况（清理后）
+      - name: 磁盘实况（构建前）
         run: |
           echo "::group::df -h"
           df -h / /mnt 2>/dev/null || df -h
