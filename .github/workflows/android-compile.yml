@@ -280,6 +280,37 @@ jobs:
           [ -d "$SDK/ndk/$NDK_VERSION" ] || { echo "::error::NDK 安装失败"; exit 1; }
           echo "NDK_ROOT=$SDK/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
 
+      # Qt 6.7.3 自带 AGP 7.4.1（官方只测到 compileSdk 33），而 androiddeployqt 会挑
+      # 这台镜像上**最新**的平台 —— 实测挑到了 android-36-ext19。那个平台的 android.jar
+      # 是 preview/ext 变体，AGP 7.4.1 的 aapt2 解析不了：
+      #
+      #   aapt2 E Failed to load resources table in APK '.../platforms/android-36-ext19/android.jar'
+      #   error: failed to load include path .../android-36-ext19/android.jar
+      #   > Task :processReleaseResources FAILED
+      #
+      # 我们 CMake 里设的 QT_ANDROID_COMPILE_SDK_VERSION 35 在这条路上没被采纳，
+      # 所以改用更确定的办法：把 36.x 与所有 *-ext* 变体卸掉，只留 android-35
+      # （正好是本仓库的 targetSdk）。
+      - name: 收敛 Android 平台到 35
+        run: |
+          set -euo pipefail
+          SDK="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
+          SDKMANAGER="$(command -v sdkmanager || ls -d "$SDK"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | head -1)"
+          [ -n "$SDKMANAGER" ] || { echo "::error::找不到 sdkmanager"; exit 1; }
+          echo "---- 卸载前 ----"
+          ls -1 "$SDK/platforms" || true
+          for p in android-37.2-beta3 android-37.2-beta2 android-37.2-beta1 android-37.2 \
+                   android-37.1 android-37.0 android-36.1 android-36-ext19 android-36-ext18 \
+                   android-36 android-35-ext15 android-35-ext14; do
+            [ -d "$SDK/platforms/$p" ] || continue
+            echo "卸载 platforms;$p"
+            sudo "$SDKMANAGER" --uninstall "platforms;$p" >/dev/null 2>&1 || echo "  （失败，忽略）"
+          done
+          [ -d "$SDK/platforms/android-35" ] || sudo "$SDKMANAGER" --install "platforms;android-35" --sdk_root="$SDK"
+          echo "---- 卸载后 ----"
+          ls -1 "$SDK/platforms"
+          [ -d "$SDK/platforms/android-35" ] || { echo "::error::android-35 平台不存在"; exit 1; }
+
       - name: 恢复依赖缓存
         uses: actions/cache/restore@v4
         with:
@@ -330,6 +361,28 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      - name: 失败时诊断
+        if: failure()
+        run: |
+          SDK="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
+          echo "::group::SDK 里的平台"
+          ls -1 "$SDK/platforms" 2>/dev/null || true
+          echo "::endgroup::"
+          echo "::group::Qt 生成的 deployment settings"
+          for f in build-android-apk-*/frontend/android-*-deployment-settings.json; do
+            [ -f "$f" ] || continue
+            echo "--- $f"
+            grep -E 'android-platform|sdk|target|min' "$f" || true
+          done
+          echo "::endgroup::"
+          echo "::group::生成的 build.gradle 里的 SDK 设置"
+          for f in build-android-apk-*/frontend/android-build/build.gradle; do
+            [ -f "$f" ] || continue
+            echo "--- $f"
+            grep -nE 'compileSdk|targetSdk|minSdk|buildToolsVersion|classpath' "$f" || true
+          done
+          echo "::endgroup::"
+
       - name: 失败时上传日志
         if: failure()
         uses: actions/upload-artifact@v4
@@ -339,6 +392,8 @@ jobs:
             apk.log
             build-android-apk-*/CMakeFiles/CMakeOutput.log
             build-android-apk-*/CMakeFiles/CMakeError.log
+            build-android-apk-*/frontend/android-*-deployment-settings.json
+            build-android-apk-*/frontend/android-build/build.gradle
             build-android-apk-*/frontend/android-build/build/outputs/logs/*.txt
           if-no-files-found: warn
           retention-days: 7
