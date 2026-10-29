@@ -158,21 +158,25 @@ fi
 echo "---- APK 内 native 库（$ABI）----"
 unzip -l "$OUT" 2>/dev/null | grep "lib/$ABI/" | awk '{print "  " $1 "  " $4}'
 
-# 从 APK 里把 libobs.so 掏出来查 .dynsym 的 main：
+# 从 APK 里把**应用库**掏出来查 .dynsym 的 main：
 # 这是 APK 能被 dlopen 起来的前提，原移植脚本里也有这一步，这里自动化。
+# 注意两个名字别搞混：
+#   libobs_<abi>.so  —— Qt 打包的应用库（本文件，含 main）
+#   liblibobs.so     —— libobs 本体（经 QT_ANDROID_EXTRA_LIBS 进来，被加了 lib 前缀）
+APP_LIB="lib/$ABI/libobs_${ABI}.so"
 CHK="$BUILD/apkcheck"
 rm -rf "$CHK"
 mkdir -p "$CHK"
-if unzip -o -q "$OUT" "lib/$ABI/libobs.so" -d "$CHK" 2>/dev/null; then
-	echo "---- APK 内 libobs.so 的 main 动态符号 ----"
+if unzip -o -q "$OUT" "$APP_LIB" -d "$CHK" 2>/dev/null; then
+	echo "---- APK 内应用库 $APP_LIB 的 main 动态符号 ----"
 	if "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-readelf" --dyn-syms \
-		"$CHK/lib/$ABI/libobs.so" 2>/dev/null | grep -qw main; then
+		"$CHK/$APP_LIB" 2>/dev/null | grep -qw main; then
 		echo "  OK：.dynsym 里有 main"
 	else
 		echo "  !! .dynsym 里没有 main —— APK 装得上但起不来"
 	fi
 else
-	echo "  !! APK 里没有 lib/$ABI/libobs.so"
+	echo "  !! APK 里没有 $APP_LIB"
 fi
 echo "======================================"
 echo "APK: $OUT"
