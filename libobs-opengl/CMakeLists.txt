@@ -4,7 +4,14 @@ add_library(libobs-opengl SHARED)
 add_library(OBS::libobs-opengl ALIAS libobs-opengl)
 
 if(NOT TARGET OBS::glad)
-  add_subdirectory("${CMAKE_SOURCE_DIR}/deps/glad" "${CMAKE_BINARY_DIR}/deps/glad")
+  # Android 用 GLES 版 glad（产物由 .qoder/gen-glad-gles.sh 生成）。
+  # 两个目录的 target/alias 名字刻意一致（obsglad / OBS::glad），
+  # 下面的 target_link_libraries 就不用再加平台分支。
+  if(OS_ANDROID)
+    add_subdirectory("${CMAKE_SOURCE_DIR}/deps/glad-gles" "${CMAKE_BINARY_DIR}/deps/glad-gles")
+  else()
+    add_subdirectory("${CMAKE_SOURCE_DIR}/deps/glad" "${CMAKE_BINARY_DIR}/deps/glad")
+  endif()
 endif()
 
 if(OS_LINUX OR OS_FREEBSD OR OS_OPENBSD)
@@ -23,6 +30,7 @@ target_sources(
   libobs-opengl
   PRIVATE
     $<$<AND:$<PLATFORM_ID:Linux,FreeBSD,OpenBSD>,$<BOOL:${ENABLE_WAYLAND}>>:gl-wayland-egl.c>
+    $<$<PLATFORM_ID:Android>:gl-android.c>
     $<$<PLATFORM_ID:Darwin>:gl-cocoa.m>
     $<$<PLATFORM_ID:Linux,FreeBSD,OpenBSD>:gl-egl-common.c>
     $<$<PLATFORM_ID:Linux,FreeBSD,OpenBSD>:gl-nix.c>
@@ -55,6 +63,8 @@ target_link_libraries(
     OBS::glad
     "$<$<PLATFORM_ID:Darwin>:$<LINK_LIBRARY:FRAMEWORK,Cocoa.framework>>"
     "$<$<PLATFORM_ID:Darwin>:$<LINK_LIBRARY:FRAMEWORK,IOSurface.framework>>"
+    $<$<PLATFORM_ID:Android>:EGL>
+    $<$<PLATFORM_ID:Android>:android>
     $<$<PLATFORM_ID:Linux,FreeBSD,OpenBSD>:Libdrm::Libdrm>
     $<$<PLATFORM_ID:Linux,FreeBSD,OpenBSD>:XCB::XCB>
     $<$<PLATFORM_ID:Linux,FreeBSD,OpenBSD>:X11::XCB>

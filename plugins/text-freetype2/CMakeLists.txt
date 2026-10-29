@@ -25,6 +25,7 @@ target_sources(
     $<$<PLATFORM_ID:Linux,FreeBSD,OpenBSD>:find-font-unix.c>
     $<$<PLATFORM_ID:Windows,Darwin>:find-font.c>
     $<$<PLATFORM_ID:Windows>:find-font-windows.c>
+    $<$<PLATFORM_ID:Android>:find-font-android.c>
     find-font.h
     obs-convenience.c
     obs-convenience.h
@@ -42,6 +43,13 @@ target_link_libraries(
     "$<$<PLATFORM_ID:Darwin>:$<LINK_LIBRARY:FRAMEWORK,Cocoa.framework>>"
     $<$<PLATFORM_ID:Linux,FreeBSD,OpenBSD>:Fontconfig::Fontconfig>
 )
+
+if(OS_ANDROID)
+  # find-font-android.c 用 __android_log_print（tag FT2FONT）报字体扫描/兜底结果：Android 上
+  # blog() 走 stderr、进不了 logcat，没有别的观测口子。log 是 NDK 公共库，链接期用 sysroot 桩库，
+  # 运行时由 /system/lib64/liblog.so 提供，不进 APK（同 android-audio 链 aaudio 的做法）。
+  target_link_libraries(text-freetype2 PRIVATE log)
+endif()
 
 # FreeType is hard-coded with /DEFAULTLIB:MSVCRT
 target_link_options(text-freetype2 PRIVATE $<$<PLATFORM_ID:Windows>:/IGNORE:4098>)

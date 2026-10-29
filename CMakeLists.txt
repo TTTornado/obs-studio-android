@@ -4,7 +4,7 @@ include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/common/bootstrap.cmake" NO_POLICY_SCO
 
 project(obs-studio VERSION ${OBS_VERSION_CANONICAL})
 
-if(CMAKE_HOST_SYSTEM_NAME MATCHES "Windows")
+if(CMAKE_HOST_SYSTEM_NAME MATCHES "Windows" AND NOT OS_ANDROID)
   include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/windows/architecture.cmake")
   if(NOT OBS_PARENT_ARCHITECTURE STREQUAL CMAKE_VS_PLATFORM_NAME)
     return()
