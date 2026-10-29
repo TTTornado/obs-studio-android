@@ -482,6 +482,11 @@ struct gs_window {
 	void *hwnd;
 #elif defined(__APPLE__)
 	__unsafe_unretained id view;
+#elif defined(__ANDROID__)
+	/* NDK clang 同样定义了 __linux__，所以这一支必须排在它前面，
+	 * 否则 Android 会静默掉进下面的 X11 分支、拿到一个没用的 uint32_t id。
+	 * 实际类型是 ANativeWindow*，由 shell 侧 ANativeWindow_fromSurface 取得。 */
+	void *surface;
 #elif defined(__linux__) || defined(__FreeBSD__)
 	/* I'm not sure how portable defining id to uint32_t is. */
 	uint32_t id;

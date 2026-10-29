@@ -797,9 +797,21 @@ static struct {
 	uint64_t timestamp;
 } timespec_offset = {0};
 
+#if defined(__ANDROID__) && __ANDROID_API__ < 29
+/* timespec_get() arrived in API 29; bionic itself recommends clock_gettime() as the portable form. */
+static int obs_timespec_get(struct timespec *ts, int base)
+{
+	if (base != TIME_UTC || clock_gettime(CLOCK_REALTIME, ts) != 0)
+		return 0;
+	return base;
+}
+#else
+#define obs_timespec_get timespec_get
+#endif
+
 static void init_timespec_offset(void)
 {
-	timespec_offset.ts_valid = timespec_get(&timespec_offset.ts, TIME_UTC) == TIME_UTC;
+	timespec_offset.ts_valid = obs_timespec_get(&timespec_offset.ts, TIME_UTC) == TIME_UTC;
 	timespec_offset.timestamp = os_gettime_ns();
 }
 

@@ -261,7 +261,7 @@ void os_set_thread_name(const char *name)
 	pthread_setname_np(name);
 #elif defined(__FreeBSD__)
 	pthread_set_name_np(pthread_self(), name);
-#elif defined(__GLIBC__) && !defined(__MINGW32__)
+#elif (defined(__GLIBC__) || defined(__ANDROID__)) && !defined(__MINGW32__)
 	if (strlen(name) <= 15) {
 		pthread_setname_np(pthread_self(), name);
 	} else {

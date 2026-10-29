@@ -256,7 +256,9 @@ void render_display(struct obs_display *display)
 
 	/* -------------------------------------------- */
 
-	if (render_display_begin(display, cx, cy, update_color_space)) {
+	const bool began = render_display_begin(display, cx, cy, update_color_space);
+
+	if (began) {
 		GS_DEBUG_MARKER_BEGIN(GS_DEBUG_COLOR_DISPLAY, "obs_display");
 
 		pthread_mutex_lock(&display->draw_callbacks_mutex);

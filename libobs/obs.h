@@ -34,6 +34,10 @@
 #include "obs-data.h"
 #include "obs-properties.h"
 #include "obs-interaction.h"
+#ifdef __ANDROID__
+/* 无 root 的 USB 通路：App 注册回调、采集插件通过 libobs 取 fd（见 obs-android.h） */
+#include "obs-android.h"
+#endif
 
 struct matrix4;
 

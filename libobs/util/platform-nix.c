@@ -27,7 +27,9 @@
 #include <glob.h>
 #include <time.h>
 #include <signal.h>
+#if !defined(__ANDROID__)
 #include <uuid/uuid.h>
+#endif
 
 #include "obsconfig.h"
 
@@ -1097,6 +1099,7 @@ uint64_t os_get_free_disk_space(const char *dir)
 }
 #endif
 
+#ifndef __ANDROID__
 char *os_generate_uuid(void)
 {
 	uuid_t uuid;
@@ -1106,3 +1109,4 @@ char *os_generate_uuid(void)
 	uuid_unparse_lower(uuid, out);
 	return out;
 }
+#endif
