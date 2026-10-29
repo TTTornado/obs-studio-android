@@ -81,12 +81,18 @@ jobs:
           if [ -d "$SDK/ndk/$NDK_VERSION" ]; then
             echo "NDK $NDK_VERSION 已存在，跳过安装"
           else
-            yes | "$SDKMANAGER" --install "ndk;$NDK_VERSION" --sdk_root="$SDK" || {
-              echo "::error::NDK $NDK_VERSION 安装失败，可用版本："
+            # 不能用 `yes | sdkmanager ... || exit` 判成败：sdkmanager 读完输入就退出，
+            # yes 收到 SIGPIPE 返回非零，在 pipefail 下会把"安装成功"误判成失败。
+            # 首次运行正是栽在这里——日志显示解压 100% 完成、目录已出现，
+            # 却因为 `yes: Broken pipe` 走进了错误分支。故忽略退出码，以目录为准。
+            set +e
+            yes 2>/dev/null | "$SDKMANAGER" --install "ndk;$NDK_VERSION" --sdk_root="$SDK"
+            set -e
+            if [ ! -d "$SDK/ndk/$NDK_VERSION" ]; then
+              echo "::error::NDK $NDK_VERSION 安装失败，已安装版本："
               ls "$SDK/ndk" 2>/dev/null || true
-              "$SDKMANAGER" --list 2>/dev/null | grep -i 'ndk;' | head -20 || true
               exit 1
-            }
+            fi
           fi
           echo "NDK_ROOT=$SDK/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
 
@@ -142,3 +148,43 @@ jobs:
       - name: 磁盘实况（结束时）
         if: always()
         run: df -h /
+
+  qt-probe:
+    name: Qt 可用性探测
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # 只用来回答一个问题：Qt 6.9.3 的 android_arm64_v8a 到底能不能匿名下载。
+    # 不阻塞主构建，失败也不影响编译验证的结论。
+    continue-on-error: true
+
+    steps:
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: 安装 aqtinstall
+        run: pip install --quiet aqtinstall
+
+      - name: 列出可用的 Android Qt 版本
+        run: |
+          echo "::group::aqt list-qt linux android"
+          aqt list-qt linux android || echo "(命令失败)"
+          echo "::endgroup::"
+
+      - name: 探测 6.9.3 的架构与模块
+        run: |
+          for v in 6.9.3 6.8.0 6.7.3; do
+            echo "::group::$v"
+            aqt list-qt linux android --arch "$v" || echo "  无此版本或查询失败"
+            echo "::endgroup::"
+          done
+
+      - name: 探测 desktop 宿主套件（androiddeployqt 来源）
+        run: |
+          echo "::group::aqt list-qt linux desktop --arch 6.9.3"
+          aqt list-qt linux desktop --arch 6.9.3 || echo "  无此版本或查询失败"
+          echo "::endgroup::"
+
+      - name: 结论
+        run: |
+          echo "把上面的输出贴回会话，即可确定 Qt 版本策略。"
