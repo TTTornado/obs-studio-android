@@ -107,9 +107,9 @@ jobs:
           path: |
             android/deps-android/prebuilt
             ~/deps-work/state
+          # 故意不加 restore-keys：依赖版本一变（versions.sh 参与 hash）就必须整份重建，
+          # 否则会把旧缓存捞回来，build.sh 看到旧 stamp 直接跳过，产物还是旧版本。
           key: deps-${{ env.ABI }}-${{ hashFiles('android/deps-android/versions.sh', 'android/deps-android/defs.sh') }}
-          restore-keys: |
-            deps-${{ env.ABI }}-
 
       - name: 下载依赖源码
         run: bash android/deps-android/fetch.sh

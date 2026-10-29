@@ -22,7 +22,7 @@ dep_version() {
     uthash)   echo 2.3.0 ;;
     jansson)  echo 2.14 ;;
     x264)     echo master ;;
-    ffmpeg)   echo 7.1.3 ;;
+    ffmpeg)   echo 8.0.3 ;;
     libusb)   echo 1.0.28 ;;
     libjpeg-turbo) echo 3.1.0 ;;
     libuvc)   echo 0.0.7 ;;
