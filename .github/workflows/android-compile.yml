@@ -280,17 +280,19 @@ jobs:
           [ -d "$SDK/ndk/$NDK_VERSION" ] || { echo "::error::NDK 安装失败"; exit 1; }
           echo "NDK_ROOT=$SDK/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
 
-      # Qt 6.7.3 自带 AGP 7.4.1（官方只测到 compileSdk 33），而 androiddeployqt 会挑
-      # 这台镜像上**最新**的平台 —— 实测挑到了 android-36-ext19。那个平台的 android.jar
-      # 是 preview/ext 变体，AGP 7.4.1 的 aapt2 解析不了：
+      # Qt 6.7.3 自带 AGP 7.4.1（官方只测到 compileSdk 33），而 androiddeployqt 会自己
+      # 扫 SDK 里的平台挑一个（deployment settings 里**没有** android-platform 字段，
+      # 我们 CMake 设的 QT_ANDROID_COMPILE_SDK_VERSION 在这条路上不被采纳）。
       #
-      #   aapt2 E Failed to load resources table in APK '.../platforms/android-36-ext19/android.jar'
-      #   error: failed to load include path .../android-36-ext19/android.jar
-      #   > Task :processReleaseResources FAILED
+      # 实测两轮：
+      #   1) 原样 → 挑到 android-36-ext19，那个 android.jar 是 preview/ext 变体，
+      #      AGP 7.4.1 的 aapt2 直接解析不了：
+      #        aapt2 E Failed to load resources table in APK '.../android-36-ext19/android.jar'
+      #        > Task :processReleaseResources FAILED
+      #   2) 卸掉 36.x 与 35-ext 后 → 又挑到 android-34-ext12（它偏好 *-ext* 变体，
+      #      排序上压过 android-35）。这次能编过，但 compileSdk 34 配 targetSdk 35 不对。
       #
-      # 我们 CMake 里设的 QT_ANDROID_COMPILE_SDK_VERSION 35 在这条路上没被采纳，
-      # 所以改用更确定的办法：把 36.x 与所有 *-ext* 变体卸掉，只留 android-35
-      # （正好是本仓库的 targetSdk）。
+      # 所以把 36.x / 35-ext* / 34-ext* 全卸掉，只留 android-35（正好是 targetSdk）。
       - name: 收敛 Android 平台到 35
         run: |
           set -euo pipefail
@@ -301,7 +303,8 @@ jobs:
           ls -1 "$SDK/platforms" || true
           for p in android-37.2-beta3 android-37.2-beta2 android-37.2-beta1 android-37.2 \
                    android-37.1 android-37.0 android-36.1 android-36-ext19 android-36-ext18 \
-                   android-36 android-35-ext15 android-35-ext14; do
+                   android-36 android-35-ext15 android-35-ext14 \
+                   android-34-ext12 android-34-ext11 android-34-ext10 android-34-ext8; do
             [ -d "$SDK/platforms/$p" ] || continue
             echo "卸载 platforms;$p"
             sudo "$SDKMANAGER" --uninstall "platforms;$p" >/dev/null 2>&1 || echo "  （失败，忽略）"

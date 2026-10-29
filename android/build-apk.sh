@@ -82,14 +82,30 @@ cp -f "$PLUG_SRC"/*.so "$PKG_LIBS"/
 echo "---- 插件暂存 -> frontend/cmake/android/libs/$ABI ----"
 ls -1 "$PKG_LIBS" | sed 's/^/  /'
 
-# ---------------------------------------------------------------- 3) androiddeployqt
+# ---------------------------------------------------------------- 3) 带插件重打包
 SETTINGS="$FE/android-obs-studio-deployment-settings.json"
 [ -f "$SETTINGS" ] || die "找不到 deployment settings: $SETTINGS"
 
 AB="$FE/android-build"
-rm -rf "$AB" # 每次从干净目录出包，避免 Gradle 中间件把旧 .so 带进来
+[ -d "$AB" ] || die "构建没有生成 android-build: $AB"
 
-echo "---- androiddeployqt ----"
+# 注意：**不要**删掉 android-build 目录。
+# Qt 的 CMake 已经把 androiddeployqt 挂成构建目标（日志里的
+# "[450/451] Creating APK for obs-studio"），那次出包时插件还没暂存，
+# 所以那个 APK **不含插件**；而 androiddeployqt 重跑时需要
+# android-build/libs/<abi>/libobs_arm64_v8a.so（CMake 拷进去的应用库），
+# 目录一删就会报 "Cannot find application binary"。
+# 因此这里只做"换掉插件 + 清产物"，然后强制重打包 —— 与原移植脚本同一套路。
+mkdir -p "$AB/libs/$ABI"
+cp -f "$PLUG_SRC"/*.so "$AB/libs/$ABI"/
+rm -f "$AB/obs-studio.apk"
+rm -rf "$AB/build/outputs/apk" \
+	"$AB/build/intermediates/merged_jni_libs" \
+	"$AB/build/intermediates/merged_native_libs" \
+	"$AB/build/intermediates/stripped_native_libs"
+find "$AB/build/outputs" -name '*-signed*.apk' -delete 2>/dev/null || true
+
+echo "---- androiddeployqt（带插件重打包） ----"
 ( cd "$FE" && "$QT_HOST_PATH/bin/androiddeployqt" \
 	--input "$SETTINGS" \
 	--output "$AB" \
