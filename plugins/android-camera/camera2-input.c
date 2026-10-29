@@ -949,6 +949,10 @@ static void close_capture_locked(struct camera2_source *c, const char *why)
 	if (!s->reader && !s->device && !s->session && !s->request)
 		return;
 
+	/* 采集已停，渲染期旋转归零：否则 base 宽高会一直停在"交换过"的状态
+	 * （obs-source.c:2720/2725）。下次 open_capture_locked 会按新相机重新折算。 */
+	obs_source_set_async_rotation(c->source, 0);
+
 	os_atomic_set_long(&c->shutting_down, 1);
 
 	if (s->session) {
@@ -1241,10 +1245,30 @@ static bool open_capture_locked(struct camera2_source *c)
 		snprintf(fps_text, sizeof(fps_text), "%d-%d（%s）", (int) flo, (int) fhi,
 			 s->session_params ? "会话参数 + 重复请求" : "只重复请求");
 
-	blog(LOG_INFO, "android-camera: 源 '%s' 开始采集 —— 相机='%s' %s 转角=%d° 尺寸=%dx%d 帧率=%s "
-			       "格式=YUV_420_888 缓冲 maxImages=%d",
-	     obs_source_get_name(c->source), cam.id, facing_name(cam.facing), cam.orientation, (int) w, (int) h,
-	     fps_text, MAX_IMAGES);
+	/* sensor 转角只说明"传感器相对设备自然方向转了多少"，画面要立起来还得按朝向折算，
+	 * 而本 App 锁死横屏（AndroidManifest 的 sensorLandscape）。折算规则：
+	 *   后摄 / 外接：直接用 sensor_orientation；
+	 *   前摄：传感器镜面使方向相反，用 (360 - sensor_orientation) % 360。
+	 *
+	 * 用 obs_source_set_async_rotation 而不是在 push_frame 里转像素 —— 它是渲染期的
+	 * 矩阵变换（libobs/obs-source.c:2576 rotate_async_video），零拷贝、零每帧 CPU，
+	 * 且会自动交换 base 宽高（obs-source.c:2720/2725）。只接受 90 的倍数。
+	 *
+	 * 真机上若方向仍不对，改这里的折算公式即可，不必动采集路径。 */
+	long rotation = 0;
+	if (cam.orientation >= 0) {
+		rotation = (cam.facing == ACAMERA_LENS_FACING_FRONT) ? (360 - (cam.orientation % 360)) % 360
+								    : (cam.orientation % 360);
+		if ((rotation % 90) != 0)
+			rotation = 0;
+	}
+	obs_source_set_async_rotation(c->source, rotation);
+
+	blog(LOG_INFO,
+	     "android-camera: 源 '%s' 开始采集 —— 相机='%s' %s sensor=%d° 渲染期旋转=%ld° 尺寸=%dx%d "
+	     "帧率=%s 格式=YUV_420_888 缓冲 maxImages=%d",
+	     obs_source_get_name(c->source), cam.id, facing_name(cam.facing), cam.orientation, rotation, (int)w,
+	     (int)h, fps_text, MAX_IMAGES);
 	return true;
 
 fail:

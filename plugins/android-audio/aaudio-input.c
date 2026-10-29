@@ -28,6 +28,9 @@
 #define AAUDIO_READ_TIMEOUT_NS 20000000LL
 #define AAUDIO_MAX_READ_FRAMES 4096
 #define AAUDIO_MIN_READ_FRAMES 96
+/* 读失败后的自愈重试次数。拔插耳机/切换音频设备会让流进入 DISCONNECTED，
+ * 而断开后的流不能再 requestStart —— 只能关掉重建。 */
+#define AAUDIO_MAX_RESTARTS 5
 
 /* AAudio 的 MMAP 那组接口是 API 36 才有的：实测在 __ANDROID_API__=29/35 的编译档下
  * 直接写函数名，clang 报 "'AAudio_getMMapPolicy' is unavailable: introduced in Android 36"
@@ -442,6 +445,26 @@ static bool aaudio_stream_open(struct aaudio_source *data)
 	return true;
 }
 
+/* 读失败后的自愈：关旧流 → 重开 → 重新起流。
+ *
+ * 拔插耳机、切换音频设备会让 AAudioStream_read 返回 AAUDIO_ERROR_DISCONNECTED，
+ * 而已经断开的流**不能**再 requestStart —— 唯一的路是关掉重建。
+ * 重开由采集线程自己完成（本文件没有 tick 回调可挂看门狗），这样
+ * thread_started 始终与"线程还活着"一致，不会出现"源看着在跑、实际没线程"的半死状态。 */
+static bool aaudio_recover(struct aaudio_source *data, unsigned long attempt)
+{
+	blog(LOG_WARNING, "aaudio: 输入流不可用，第 %lu/%d 次重开（state=%d）", attempt, AAUDIO_MAX_RESTARTS,
+	     data->stream ? (int) AAudioStream_getState(data->stream) : -1);
+
+	aaudio_stream_close(data);
+	if (data->buf) {
+		bfree(data->buf);
+		data->buf = NULL;
+		data->buf_size = 0;
+	}
+	return aaudio_stream_open(data);
+}
+
 static void *aaudio_capture_thread(void *param)
 {
 	struct aaudio_source *data = param;
@@ -455,10 +478,36 @@ static void *aaudio_capture_thread(void *param)
 		if (got < 0) {
 			if (got == AAUDIO_ERROR_TIMEOUT)
 				continue;
+
 			blog(got == AAUDIO_ERROR_DISCONNECTED ? LOG_WARNING : LOG_ERROR,
-			     "aaudio: AAudioStream_read 返回 %d (%s)，state=%d，采集线程退出", (int) got,
+			     "aaudio: AAudioStream_read 返回 %d (%s)，state=%d，准备重开", (int) got,
 			     AAudio_convertResultToText(got), (int) AAudioStream_getState(data->stream));
-			break;
+
+			/* 不能直接 break：那样 thread_started 仍是 true（只在 aaudio_capture_stop 里清），
+			 * 源看起来还活着却永远没声音 —— 这正是 P0-3「拔插耳机后永久静音」的成因。
+			 * 改为在**本线程内**自愈：关旧流重开，退避重试有限次，期间随时响应停止事件。 */
+			if (os_event_try(data->stop_event) == 0)
+				break;
+
+			bool recovered = false;
+			for (unsigned long i = 1; i <= AAUDIO_MAX_RESTARTS; i++) {
+				if (os_event_try(data->stop_event) == 0)
+					break;
+				os_sleep_ms(500);
+				if (aaudio_recover(data, i)) {
+					recovered = true;
+					break;
+				}
+			}
+			if (!recovered) {
+				blog(LOG_ERROR,
+				     "aaudio: 连续重开 %d 次仍失败，采集线程退出（源需要重新激活才会再试）",
+				     AAUDIO_MAX_RESTARTS);
+				break;
+			}
+			blog(LOG_INFO, "aaudio: 输入流已重新打开，继续采集");
+			ts = os_gettime_ns(); // 断档不该被算进音频时长
+			continue;
 		}
 
 		struct obs_source_audio out = {0};
@@ -476,9 +525,10 @@ static void *aaudio_capture_thread(void *param)
 		data->pushes++;
 		data->frames_total += (uint64_t) got;
 		if (data->pushes == 1 || data->pushes % 100 == 0)
-			blog(LOG_INFO, "aaudio: 第 %llu 次推送（本批 %d 帧，累计 %llu 帧 ≈ %.2f 秒）",
+			blog(LOG_INFO, "aaudio: 第 %llu 次推送（本批 %d 帧，累计 %llu 帧 ≈ %.2f 秒，xrun=%d）",
 			     (unsigned long long) data->pushes, (int) got, (unsigned long long) data->frames_total,
-			     (double) data->frames_total / (double) data->rate);
+			     (double) data->frames_total / (double) data->rate,
+			     (int) AAudioStream_getXRunCount(data->stream));
 	}
 
 	return NULL;

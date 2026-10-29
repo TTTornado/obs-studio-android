@@ -277,6 +277,15 @@ out:
 #define AUDIO_READ_FRAMES 1024
 
 static pthread_mutex_t audio_mx = PTHREAD_MUTEX_INITIALIZER;
+/* 串行化泵线程的 start/stop，与 audio_mx 分工明确：
+ *   audio_mx     只保护 audio_sinks 这张表和 audio_users，**绝不覆盖 join**；
+ *   audio_life_mx 覆盖"建线程 / join 线程"整段，泵线程自己不碰它。
+ *
+ * 之前只有 audio_mx 一把锁：audio_pump_release 在持锁状态下调用 stop，
+ * stop 里 pthread_join 等泵线程退出，而泵线程每轮都要 pthread_mutex_lock(&audio_mx)
+ * 才能推音频 —— 于是"最后一颗屏幕源销毁"必然死锁（UI/视频线程永久卡住）。
+ * 拆成两把锁后，join 期间泵线程仍能拿到 audio_mx 走完最后一轮并看到停止事件。 */
+static pthread_mutex_t audio_life_mx = PTHREAD_MUTEX_INITIALIZER;
 static DARRAY(obs_source_t *) audio_sinks;
 static long audio_users = 0; /* 要音的源数；与 audio_sinks.num 同增同减，都在 audio_mx 里动 */
 static pthread_t audio_thread;
@@ -354,7 +363,8 @@ static void *audio_pump_thread(void *param)
 
 /* 只在持锁时调。起不来只是"这一场没有内录"，视频那一路照旧 —— 所以它的失败不进 c->last_error：
  * 那本账记的是"采集开不起来"，混进来会把两件不相干的事说成一件。 */
-static bool audio_pump_start(void)
+/* 调用方必须持有 audio_life_mx（见 audio_pump_start 包装）。 */
+static bool audio_pump_start_impl(void)
 {
 	if (audio_thread_started)
 		return true;
@@ -398,10 +408,21 @@ fail:
 	return false;
 }
 
-/* 只在持锁时调，且**只由最后一颗源的 release 走到这里**。先 join 线程再动总线那一格：
- * 前端的 stopAudio 会销掉它复用的那枚 short[]（global ref），而读它的人就是这条线程 ——
- * 顺序反了便是"边读边拆"。这个顺序同时也是 OBSAndroidPermissions.cpp 里那句"不上锁"的前提。 */
-static void audio_pump_stop(void)
+/* 起泵。**不要**在持 audio_mx 时调用（见 audio_pump_acquire 的注释）。 */
+static bool audio_pump_start(void)
+{
+	pthread_mutex_lock(&audio_life_mx);
+	const bool ok = audio_pump_start_impl();
+	pthread_mutex_unlock(&audio_life_mx);
+	return ok;
+}
+
+/* 停泵。**只由最后一颗源的 release 走到这里**，且调用方**不得**持有 audio_mx
+ * （否则就是原来的死锁）。先 join 线程再动总线那一格：前端的 stopAudio 会销掉它
+ * 复用的那枚 short[]（global ref），而读它的人就是这条线程 —— 顺序反了便是"边读边拆"。
+ * 这个顺序同时也是 OBSAndroidPermissions.cpp 里那句"不上锁"的前提。
+ * 调用方必须持有 audio_life_mx（见 audio_pump_stop 包装）。 */
+static void audio_pump_stop_impl(void)
 {
 	if (audio_thread_started) {
 		os_event_signal(audio_stop);
@@ -426,6 +447,14 @@ static void audio_pump_stop(void)
 	audio_nonzero_logged = false;
 }
 
+/* 停泵。**不要**在持 audio_mx 时调用（见 audio_pump_release 的注释）。 */
+static void audio_pump_stop(void)
+{
+	pthread_mutex_lock(&audio_life_mx);
+	audio_pump_stop_impl();
+	pthread_mutex_unlock(&audio_life_mx);
+}
+
 /* 一颗源开始要音。在 open_capture 成功的那一刻调 —— 与面同生，因为它依附的是同一份令牌。 */
 static void audio_pump_acquire(struct screen_source *c)
 {
@@ -436,23 +465,32 @@ static void audio_pump_acquire(struct screen_source *c)
 	pthread_mutex_lock(&audio_mx);
 	da_push_back(audio_sinks, &ref);
 	audio_users++;
-	audio_pump_start(); // 起不来就在里面报，这里不改返回值：视频那一路不欠它什么
 	pthread_mutex_unlock(&audio_mx);
+
+	/* 起泵放在列表锁外：它要拿 audio_life_mx，建线程不该和 audio_mx 纠缠。
+	 * 起不来就在里面报，这里不改返回值 —— 视频那一路不欠它什么。 */
+	audio_pump_start();
 }
 
 /* 一颗源不再要音。没登记过就是空转（close_capture 既可能从没 acquire 过，也可能被调两遍）。 */
 static void audio_pump_release(struct screen_source *c)
 {
+	bool need_stop = false;
+
 	pthread_mutex_lock(&audio_mx);
 	const size_t idx = da_find(audio_sinks, &c->source, 0);
 	if (idx != DARRAY_INVALID) {
 		obs_source_t *ref = audio_sinks.array[idx];
 		da_erase(audio_sinks, idx);
 		obs_source_release(ref);
-		if (--audio_users == 0)
-			audio_pump_stop();
+		need_stop = (--audio_users == 0);
 	}
 	pthread_mutex_unlock(&audio_mx);
+
+	/* 必须在锁外停泵：stop 里要 join 泵线程，而泵线程每轮都要拿 audio_mx ——
+	 * 在锁内 join 就是死锁（P0-1：最后一颗源销毁时 UI/视频线程永久卡住）。 */
+	if (need_stop)
+		audio_pump_stop();
 }
 
 /* 属性页那一行：伴音这条路通不通，用户只能从这里看见（ mixer 表在别的窗口里）。
@@ -656,6 +694,21 @@ static void *screen_create(obs_data_t *settings, obs_source_t *source)
 	struct screen_source *c = bzalloc(sizeof(*c));
 
 	c->source = source;
+
+	/* 屏幕采集的语义是"永远是最后一帧赢"，不需要帧队列。
+	 * 队列只会把内存放大到 MAX_ASYNC_FRAMES（libobs/obs-source.c:3540）份裸帧，
+	 * 而这里每帧是**整屏 RGBA**（1080p ≈ 8.3 MB、4K ≈ 33 MB），30 帧就是数百 MB ——
+	 * 手机上一个渲染线程的小停顿就足以 OOM。
+	 *
+	 * unbuffered 让 ready_async_frame（obs-source.c:4132-4141）每次取帧时把队列
+	 * 裁到只剩 1 份，稳态内存从"最多 30 帧"降到 1~2 帧，且不改变分辨率、
+	 * 不增加任何每帧 CPU 开销（比插件侧降采样便宜得多）。
+	 *
+	 * 残留风险：若渲染线程长时间完全停摆，cache_video 的上限仍是 30 帧
+	 * （obs-source.c:3548），那种极端情况下峰值不变 —— 但稳态不再随分辨率
+	 * 线性放大，而原先会 OOM 的正是稳态这条路。 */
+	obs_source_set_async_unbuffered(source, true);
+
 	os_atomic_inc_long(&live_sources);
 	UNUSED_PARAMETER(settings); // 这一轮没有任何用户可调项：尺寸必然是整块屏幕
 	return c;
