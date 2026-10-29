@@ -104,6 +104,7 @@ finish:
 	return success;
 }
 
+#ifndef __ANDROID__
 static bool ingest_update(void *param, struct file_download_data *data)
 {
 	struct service_ingests *service = param;
@@ -120,9 +121,21 @@ static bool ingest_update(void *param, struct file_download_data *data)
 
 	return true;
 }
+#endif
 
 void service_ingests_refresh(struct service_ingests *si, int seconds, const char *log_prefix, const char *file_url)
 {
+#ifdef __ANDROID__
+	/* 阶段 4 P-2：Android 档 file-updater 是 no-op 替身（create_single 返回 NULL ⇒ 不起线程、
+	   不会有回调），而 ingests_refreshed 只有回调会置位 ⇒ 原来会空等满 seconds（Twitch / Amazon IVS
+	   选 "auto" 时 3~5 秒）才退回内置默认 ingest。这里直接置位，立即拿到默认 ingest。
+	   写成 #ifdef 分支而不是"早返回 + 保留原代码"：后者会让下面的代码成为 unreachable，本工具链
+	   -Werror,-Wunreachable-code 实测编不过（service-ingest.c:137）。 */
+	UNUSED_PARAMETER(seconds);
+	UNUSED_PARAMETER(log_prefix);
+	UNUSED_PARAMETER(file_url);
+	os_atomic_set_bool(&si->ingests_refreshed, true);
+#else
 	if (os_atomic_load_bool(&si->ingests_refreshed))
 		return;
 
@@ -141,6 +154,7 @@ void service_ingests_refresh(struct service_ingests *si, int seconds, const char
 			os_sleep_ms(10);
 		}
 	}
+#endif
 }
 
 void load_service_data(struct service_ingests *si, const char *cache_filename, struct ingest *def)

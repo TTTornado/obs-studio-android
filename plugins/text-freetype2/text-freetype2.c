@@ -526,6 +526,12 @@ error:
 #define DEFAULT_FACE "Arial"
 #elif __APPLE__
 #define DEFAULT_FACE "Helvetica"
+#elif defined(__ANDROID__)
+/* Android 上没有 fontconfig ⇒ "Sans Serif" 这种别名在设备字体表里根本不存在，会顺着
+ * find-font-android.c 的兜底链拿到 Roboto，而 Roboto 的 CJK 覆盖实测是 0 ⇒ 用户新建文本源、
+ * 没手动选过字体时，中文全是 .notdef 方框。这里直接写设备上真实注册、且带 CJK 覆盖的家族名
+ * （量法与 face 序号见 frontend/components/Multiview.cpp 同一处注释）。 */
+#define DEFAULT_FACE "Noto Sans CJK SC"
 #else
 #define DEFAULT_FACE "Sans Serif"
 #endif

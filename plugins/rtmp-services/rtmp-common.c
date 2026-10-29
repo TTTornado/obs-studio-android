@@ -327,6 +327,25 @@ static void add_services(obs_property_t *list, json_t *root, bool show_all, cons
 		obs_property_list_insert_string(list, 0, cur_service, cur_service);
 		obs_property_list_item_disable(list, 0, true);
 	}
+
+#ifdef __ANDROID__
+	/* 阶段 4 P-2 排查：这里能跑进来说明 services.json 已经读到了（root 来自
+	   open_services_file），于是"列表为空"就只剩一个来源 —— 下面这道协议闸门把条目全滤掉了。
+	   闸门查的是 obs_is_output_protocol_registered()，而注册 RTMP/RTMPS 的是 obs-outputs，
+	   它在 Android 白名单里要到 P-5 才放行。没有这条日志就分不开"没读到文件"和"读到了但被滤空"。 */
+	size_t total = json_array_size(root);
+	size_t pass = 0;
+
+	json_array_foreach (root, index, service) {
+		if (is_protocol_available(service))
+			pass++;
+	}
+	blog(LOG_WARNING,
+	     "rtmp-common.c: [add_services] JSON 条目=%zu 协议闸门放行=%zu 入列=%zu "
+	     "RTMP=%d RTMPS=%d show_all=%d",
+	     total, pass, obs_property_list_item_count(list), (int)obs_is_output_protocol_registered("RTMP"),
+	     (int)obs_is_output_protocol_registered("RTMPS"), (int)show_all);
+#endif
 }
 
 static json_t *open_json_file(const char *file)
@@ -354,7 +373,9 @@ static json_t *open_json_file(const char *file)
 	format_ver = get_int_val(root, "format_version");
 
 	if (format_ver != RTMP_SERVICES_FORMAT_VERSION) {
-		blog(LOG_DEBUG,
+		/* 原来是 LOG_DEBUG：默认日志级别看不见，于是"整个服务列表读不出来"这件事在设备上
+		   完全无声（阶段 4 P-2 排查时踩的就是这个）。这种全量失败该有 LOG_WARNING。 */
+		blog(LOG_WARNING,
 		     "rtmp-common.c: [open_json_file] "
 		     "Wrong format version (%d), expected %d",
 		     format_ver, RTMP_SERVICES_FORMAT_VERSION);
@@ -394,6 +415,27 @@ static json_t *open_services_file(void)
 			bfree(file);
 		}
 	}
+
+#ifdef __ANDROID__
+	/* 阶段 4 P-2 排查用：读不到服务列表时原来完全无声 —— open_json_file 里
+	   "os_quick_read_utf8_file 返回 NULL"那条分支一句 blog 都没有。这里把两个候选路径、
+	   存不存在、多大一次打全，才分得清是"路径没解析出来 / 文件不在 / 读不出来 / 版本不对"。 */
+	if (!root) {
+		char *pc = obs_module_config_path("services.json");
+		char *pm = obs_module_file("services.json");
+		char *dc = pc ? os_quick_read_utf8_file(pc) : NULL;
+		char *dm = pm ? os_quick_read_utf8_file(pm) : NULL;
+		blog(LOG_WARNING,
+		     "rtmp-common.c: [open_services_file] 服务列表读不到 config='%s'(在=%d,读出=%lld) "
+		     "module='%s'(在=%d,读出=%lld)",
+		     pc ? pc : "(NULL)", pc ? (int)os_file_exists(pc) : 0, (long long)(dc ? strlen(dc) : -1),
+		     pm ? pm : "(NULL)", pm ? (int)os_file_exists(pm) : 0, (long long)(dm ? strlen(dm) : -1));
+		bfree(dc);
+		bfree(dm);
+		bfree(pc);
+		bfree(pm);
+	}
+#endif
 
 	return root;
 }

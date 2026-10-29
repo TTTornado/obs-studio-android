@@ -339,6 +339,26 @@ RTMP_TLS_LoadCerts(RTMP *r) {
 
     CFRelease(anchors);
 
+#elif defined(__ANDROID__)
+    /* clang 给 Android 目标也定义了 __linux__，所以下面那条 Linux 分支在安卓上是**先被命中**的 ——
+     * 而 `/etc/ssl/certs` 在安卓上根本不存在（实测这台 MuMu 系统镜像：`ls /etc/ssl` → No such file
+     * or directory），`mbedtls_x509_crt_parse_path` 必然失败 ⇒ 走到 error: 把 cacert 置 NULL
+     * ⇒ 所有 RTMPS 连接握手必挂。
+     * 安卓自己的系统信任锚有**两份**，不是一份（实测 ro.build.version.release=15 / sdk=35）：
+     *   /apex/com.android.conscrypt/cacerts  —— Android 11(API 30) 起随 conscrypt APEX 走 Mainline，
+     *                                          会被更新；实测 145 个 PEM。
+     *   /system/etc/security/cacerts         —— 镜像里那份冻结的兼容副本；实测也是 145 个 PEM，
+     *                                          `-rw-r--r-- root root` ⇒ 应用进程可读。
+     * 取"apex 优先、system 兜底"：新机上拿更新过的那份；API<30 没有 apex 目录时 parse_path 直接返负、
+     * 短路到兜底。两处都是 OpenSSL hash-dir 形式，正是 parse_path 吃的格式。
+     * 用户自行添加的锚在 /data/misc/user/0/cacerts-added，那目录应用读不到，
+     * 与 Java 侧 TrustManager 的行为一致，不在这里补。 */
+    if (mbedtls_x509_crt_parse_path(chain, "/apex/com.android.conscrypt/cacerts/") < 0 &&
+        mbedtls_x509_crt_parse_path(chain, "/system/etc/security/cacerts/") < 0) {
+        RTMP_Log(RTMP_LOGERROR, "mbedtls_x509_crt_parse_path: Couldn't parse "
+            "/apex/com.android.conscrypt/cacerts nor /system/etc/security/cacerts");
+        goto error;
+    }
 #elif defined(__linux__) || defined(__FreeBSD__)
     if (mbedtls_x509_crt_parse_path(chain, "/etc/ssl/certs/") < 0) {
         RTMP_Log(RTMP_LOGERROR, "mbedtls_x509_crt_parse_path: Couldn't parse "

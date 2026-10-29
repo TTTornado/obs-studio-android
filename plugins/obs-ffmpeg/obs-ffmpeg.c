@@ -9,7 +9,11 @@
 #include <dxgi.h>
 #endif
 
-#if !defined(_WIN32) && !defined(__APPLE__)
+// 阶段 4 P-6：Android 归到"没有 VAAPI"这一边。原本两档排除（Win/macOS）之外的都算有，
+// 于是 __ANDROID__ 会被误纳：vaapi-utils.h 要 #include <va/va.h>（deps-android 无 libva），
+// 而 vaapi-utils.c 在 CMake 的 target_sources 里只挂 Linux/FreeBSD/OpenBSD，
+// 放开只会得到一批 *_vaapi_encoder_info / vaapi_get_*_default_device 未定义符号。
+#if !defined(_WIN32) && !defined(__APPLE__) && !defined(__ANDROID__)
 #include "vaapi-utils.h"
 
 #define LIBAVUTIL_VAAPI_AVAILABLE

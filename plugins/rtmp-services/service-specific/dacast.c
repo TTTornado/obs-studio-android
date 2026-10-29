@@ -154,6 +154,11 @@ void dacast_ingests_load_data(const char *server, const char *key)
 	dacast_update_info = update_info_create_single("[dacast ingest load data] ", get_module_name(), uri.array,
 						       dacast_ingest_update, (void *)key);
 
+#ifndef __ANDROID__
+	/* 阶段 4 P-2：这轮等待只在真 file-updater 下有意义。Android 档 create_single 返回 NULL、
+	   ingests_loaded 永远等不到置位 ⇒ rtmp-common.c:873 每取一次 Dacast server 就稳定空等
+	   TIMEOUT_SEC 秒。而 Dacast 的 ingest 表本来就只由下载回调填充，跳过等待并不改变结果
+	   （dacast_ingest() 返回 dacast_invalid_ingest）。 */
 	if (!os_atomic_load_bool(&ingests_loaded)) {
 		for (int i = 0; i < TIMEOUT_SEC * 100; i++) {
 			if (os_atomic_load_bool(&ingests_loaded)) {
@@ -162,6 +167,7 @@ void dacast_ingests_load_data(const char *server, const char *key)
 			os_sleep_ms(10);
 		}
 	}
+#endif
 
 	dstr_free(&uri);
 }

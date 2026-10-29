@@ -573,7 +573,7 @@ static void set_output_error(struct rtmp_stream *stream)
 			break;
 		case -0x7680:
 			msg = "Failed to load root certificates for a secure TLS connection."
-#if defined(__linux__)
+#if defined(__linux__) && !defined(__ANDROID__)
 			      " Check you have an up to date root certificate bundle in /etc/ssl/certs."
 #endif
 				;

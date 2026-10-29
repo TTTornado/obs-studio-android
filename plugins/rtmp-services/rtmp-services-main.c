@@ -115,12 +115,14 @@ bool obs_module_load(void)
 						 cache_dir, confirm_service_file, NULL);
 	}
 
-	load_twitch_data();
-	load_amazon_ivs_data();
-
 	bfree(local_dir);
 	bfree(cache_dir);
 #endif
+
+	/* 阶段 4 P-2：这两步从 #if 里挪出来 —— 它们只往列表里 push 编译期内置的默认 ingest、再读一份
+	   本地缓存，本身不联网。留在门禁里会让 Android 档列表为空（get_ingest 返回全 NULL）。 */
+	load_twitch_data();
+	load_amazon_ivs_data();
 
 	obs_register_service(&rtmp_common_service);
 	obs_register_service(&rtmp_custom_service);
