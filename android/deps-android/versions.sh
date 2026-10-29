@@ -21,6 +21,7 @@ dep_version() {
     simde)    echo 0.8.2 ;;
     uthash)   echo 2.3.0 ;;
     jansson)  echo 2.14 ;;
+    nlohmann_json) echo 3.11.3 ;;
     x264)     echo master ;;
     ffmpeg)   echo 8.0.3 ;;
     libusb)   echo 1.0.28 ;;
@@ -43,6 +44,7 @@ dep_url() {
     simde)    echo "https://github.com/simd-everywhere/simde/archive/refs/tags/v${v}.tar.gz" ;;
     uthash)   echo "https://github.com/troydhanson/uthash/archive/refs/tags/v${v}.tar.gz" ;;
     jansson)  echo "https://github.com/akheron/jansson/archive/refs/tags/v${v}.tar.gz" ;;
+    nlohmann_json) echo "https://github.com/nlohmann/json/archive/refs/tags/v${v}.tar.gz" ;;
     x264)     echo "https://code.videolan.org/videolan/x264/-/archive/${v}/x264-${v}.tar.bz2" ;;
     ffmpeg)   echo "https://ffmpeg.org/releases/ffmpeg-${v}.tar.xz" ;;
     libusb)   echo "https://github.com/libusb/libusb/archive/refs/tags/v${v}.tar.gz" ;;
@@ -61,7 +63,7 @@ dep_url() {
 # 每个依赖属于哪个批次
 dep_batch() {
   case "$1" in
-    simde|uthash|jansson|x264|ffmpeg) echo core ;;
+    simde|uthash|jansson|nlohmann_json|x264|ffmpeg) echo core ;;
     libusb|libuvc|libjpeg-turbo)     echo usb ;;
     speexdsp|rnnoise|freetype)       echo filters ;;
     mbedtls|curl|fdk-aac)            echo output ;;
@@ -72,7 +74,7 @@ dep_batch() {
 # 批次展开为依赖列表（顺序即编译顺序，含依赖关系）
 batch_deps() {
   case "$1" in
-    core)    echo "simde uthash jansson x264 ffmpeg" ;;
+    core)    echo "simde uthash jansson nlohmann_json x264 ffmpeg" ;;
     usb)     echo "libusb libjpeg-turbo libuvc" ;;
     filters) echo "speexdsp rnnoise freetype" ;;
     output)  echo "mbedtls curl fdk-aac" ;;

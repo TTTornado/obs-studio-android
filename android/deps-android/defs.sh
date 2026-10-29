@@ -72,6 +72,16 @@ build_jansson() {
     -DJANSON_BUILD_DOC=OFF
 }
 
+# OBS 33.0 新增：frontend/cmake/feature-plugin-manager.cmake:1 有
+#   find_package(nlohmann_json 3.11 REQUIRED)
+# 是 PluginManager 的依赖。纯头文件库，装出来的东西只有 include/nlohmann/*.hpp
+# 和 share/cmake/nlohmann_json/*.cmake，没有 .a（_audit_arch 对它自然是空转）。
+build_nlohmann_json() {
+  _run_cmake "$(src_dir nlohmann_json)" \
+    -DJSON_BuildTests=OFF \
+    -DJSON_Install=ON
+}
+
 build_libusb() {
   # libusb 1.0.28 源码树无 CMakeLists.txt（CMake 支持仅存在于 git master），走 autotools
   _autoconf_dep libusb --disable-udev --disable-examples-build
