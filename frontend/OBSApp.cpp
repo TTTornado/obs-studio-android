@@ -54,6 +54,7 @@
 #include <QElapsedTimer>
 #include <QTimer>
 #include <QScreen> // B 方案：顶层对话框压进 availableGeometry 时要完整类型
+#include <QScroller> // 单指滑动滚动（QScroller）
 #endif
 
 #include <chrono>
@@ -1043,6 +1044,44 @@ static void clampTopLevelToScreen(QWidget *w)
 			     after.height(), avail.width(), avail.height());
 }
 
+/* 给对话框里的滚动区开单指滑动（QScroller）。
+ *
+ * 背景：Qt 在 Android 上把单指触摸合成成鼠标事件，而 QAbstractScrollArea 只在
+ * wheelEvent 里滚动 —— 所以现在只有"双指拖"（Qt 把它合成成 QWheelEvent）能滚；
+ * 单指拖在桌面语义里是框选/拖拽，不滚。这是手机上最不习惯的一点。
+ *
+ * 用 TouchGesture（而不是 LeftMouseButtonGesture）：
+ *   TouchGesture 会给控件设 WA_AcceptTouchEvents（见 qscroller.cpp 的 grabGesture
+ *   :372-373），直接吃原始触摸事件 —— 滚动时**不会先按下选中列表项**，
+ *   这才是 Android 上正常的观感。
+ *   LeftMouseButtonGesture 走的是合成鼠标事件，拖动会先触发一次 press，
+ *   列表项被顺带选中，观感差一截。
+ *
+ * 代价与风险：控件接受触摸后，Qt 不再为它合成鼠标事件，**轻点是否还能选中/触发
+ * 列表项必须真机验证**。若点击失灵，把这里换回 LeftMouseButtonGesture 即可
+ * （它不动 WA_AcceptTouchEvents，鼠标合成照旧，代价是滚动时会误选中一次）。
+ *
+ * 只作用于对话框：本函数只从"非主窗"的 Show 分支里调，所以主窗口里的
+ * 场景/源列表不受影响 —— 那两个有拖拽排序，单指拖必须留给拖拽。 */
+static void enableFlickScroll(QWidget *w)
+{
+	if (!w)
+		return;
+
+	const QList<QAbstractScrollArea *> areas = w->findChildren<QAbstractScrollArea *>();
+	int grabbed = 0;
+	for (QAbstractScrollArea *area : areas) {
+		QWidget *vp = area->viewport();
+		if (!vp || QScroller::hasScroller(vp))
+			continue; // 没有 viewport 或已经抓过，别重复挂
+		QScroller::grabGesture(vp, QScroller::TouchGesture);
+		++grabbed;
+	}
+
+	obsAndroidDisplayLog("FLICK %s：滚动区 %d 个，本次开 %d 个", w->metaObject()->className(),
+			     int(areas.size()), grabbed);
+}
+
 class AndroidInputFilter : public QObject {
 public:
 	explicit AndroidInputFilter(QObject *parent = nullptr) : QObject(parent)
@@ -1130,10 +1169,14 @@ protected:
 				int(flags.testFlag(Qt::Dialog)), int(pw->isVisible()),
 				int(qApp->activePopupWidget() == pw));
 
-			/* B 方案：顶层窗口显示后统一压进屏幕。只对 Show 做（Hide/Close/Expose 不需要），
-			 * 并且延后一拍等布局跑完，见 clampTopLevelToScreen 的注释。 */
+			/* 顶层窗口显示后做两件事，都延后一拍等布局跑完：
+			 * ① 压进屏幕可用区（B 方案，见 clampTopLevelToScreen）
+			 * ② 给里面的滚动区开单指滑动（见 enableFlickScroll） */
 			if (ev->type() == QEvent::Show)
-				QTimer::singleShot(0, pw, [pw] { clampTopLevelToScreen(pw); });
+				QTimer::singleShot(0, pw, [pw] {
+					clampTopLevelToScreen(pw);
+					enableFlickScroll(pw);
+				});
 			break;
 		}
 		case QEvent::Gesture: {
