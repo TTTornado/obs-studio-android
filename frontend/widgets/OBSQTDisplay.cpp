@@ -91,6 +91,10 @@ OBSQTDisplay::OBSQTDisplay(QWidget *parent, Qt::WindowFlags flags) : QWidget(par
 			return;
 		}
 
+#ifdef __ANDROID__
+		syncAndroidSurfaceGeometry();
+#endif
+
 		if (!display) {
 			CreateDisplay();
 		} else {
@@ -190,6 +194,20 @@ static QRect AndroidScreenRectPx(QWidget *w)
 	const QPoint g = w->mapToGlobal(QPoint(0, 0));
 	const QSize px = GetPixelSize(w);
 	return QRect(qRound(g.x() * dpr), qRound(g.y() * dpr), px.width(), px.height());
+}
+
+void OBSQTDisplay::syncAndroidSurfaceGeometry()
+{
+	/* A modal dialog destroys the rendering surface, but leaves its Java view
+	 * attached. Keep that view aligned while display is null as well, so showing
+	 * it again uses the latest layout (e.g. after the source toolbar appears).
+	 * Embedded dialog previews must never resize the main preview's shared view. */
+	if (destroying || androidSuspended || !isVisible() || obsAndroidDisplayLifecycleOwner() != this)
+		return;
+
+	const QRect r = AndroidScreenRectPx(this);
+	QString detail;
+	obsAndroidDisplayUpdateRect(r.x(), r.y(), r.width(), r.height(), &detail);
 }
 #endif
 
@@ -414,14 +432,10 @@ void OBSQTDisplay::resizeEvent(QResizeEvent *event)
 	if (isVisible() && display) {
 		QSize size = GetPixelSize(this);
 		obs_display_resize(display, size.width(), size.height());
-#ifdef __ANDROID__
-		/* B-3：把同样的矩形推给 Java，让 SurfaceView 的 buffer 尺寸跟上 obs_display_resize，
-		 * 否则渲染视口与窗口面尺寸错位，多出来的部分是没清过的黑。 */
-		const QRect r = AndroidScreenRectPx(this);
-		QString d;
-		obsAndroidDisplayUpdateRect(r.x(), r.y(), r.width(), r.height(), &d);
-#endif
 	}
+#ifdef __ANDROID__
+	syncAndroidSurfaceGeometry();
+#endif
 
 	emit DisplayResized();
 }
@@ -435,13 +449,10 @@ void OBSQTDisplay::OnMove()
 {
 	if (display) {
 		obs_display_update_color_space(display);
-#ifdef __ANDROID__
-		/* 位置变了（尺寸可能没变）也要推给 Java，SurfaceView 才跟得住。 */
-		const QRect r = AndroidScreenRectPx(this);
-		QString d;
-		obsAndroidDisplayUpdateRect(r.x(), r.y(), r.width(), r.height(), &d);
-#endif
 	}
+#ifdef __ANDROID__
+	syncAndroidSurfaceGeometry();
+#endif
 }
 
 void OBSQTDisplay::OnDisplayChange()
