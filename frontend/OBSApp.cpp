@@ -53,6 +53,7 @@
 #include <QGestureEvent> // P-8 探针：认出 TapAndHold 手势
 #include <QElapsedTimer>
 #include <QTimer>
+#include <QScreen> // B 方案：顶层对话框压进 availableGeometry 时要完整类型
 #endif
 
 #include <chrono>
@@ -989,6 +990,59 @@ std::vector<UpdateBranch> OBSApp::GetBranches()
  * 什么都没弹就照常交回控件 —— 否则长按等于把按钮的 clicked 吃掉，见 fire() 的返回值注释。
  * ② 返回键 = Escape，见下面 KeyPress 那一格（build 74）。
  * 不用 Q_OBJECT：只要 eventFilter 虚函数 + 成员 QTimer，省掉一次 moc。 */
+/* 把顶层窗口压进屏幕可用区（全局兜底，B 方案）。
+ *
+ * 背景：OBS 的对话框尺寸是按桌面设计的 —— 添加源 1040x620、设置 981x730、
+ * 高级音频 1100x340、滤镜 861x726 …，而这块手机横屏的逻辑尺寸只有 873x393，
+ * 于是底部按钮和右侧内容直接落在屏外、点不到。原作者对
+ * OBSBasicFilters / OBSBasicSettings / OBSYoutubeActions 逐个在 showEvent 里
+ * "收高度"处理过，剩下的（包括最常用的"添加源"）没管。
+ *
+ * 这里改成全局兜底：任何顶层窗口显示后，只要比可用区大就压到可用区并居中。
+ * 覆盖全部对话框，以后新增的也自动受益。
+ *
+ * 两个注意点：
+ * 1) 用 singleShot(0) 延迟一拍，不在 Show 里同步 resize —— Show 那一刻布局还没跑完，
+ *    此时 size() 还是 .ui 里的设计尺寸，改完会被随后的布局覆盖。
+ * 2) resize() 受控件最小尺寸约束（minimumSize / 布局的 minimumSizeHint）。
+ *    压不下去时"实际"会大于"目标"——日志里两个数都打出来，一眼能看出是不是被挡住了。
+ *    那种情况需要单独处理（内部套 QScrollArea，或放宽布局约束）。 */
+static void clampTopLevelToScreen(QWidget *w)
+{
+	if (!w || !w->isWindow())
+		return;
+
+	const Qt::WindowFlags f = w->windowFlags();
+	if (f.testFlag(Qt::Popup) || f.testFlag(Qt::ToolTip))
+		return;
+
+	QScreen *scr = w->screen();
+	if (!scr)
+		return;
+
+	const QRect avail = scr->availableGeometry();
+	const int margin = 8;
+	const QSize maxSize(qMax(320, avail.width() - margin * 2), qMax(240, avail.height() - margin * 2));
+
+	const QSize before = w->size();
+	QSize target = before;
+	if (target.width() > maxSize.width())
+		target.setWidth(maxSize.width());
+	if (target.height() > maxSize.height())
+		target.setHeight(maxSize.height());
+
+	if (target == before)
+		return; // 本来就装得下，不动
+
+	w->resize(target);
+	const QSize after = w->size(); // resize 可能被最小尺寸挡住，这里取实际值
+	w->move(avail.center() - QPoint(after.width() / 2, after.height() / 2));
+
+	obsAndroidDisplayLog("CLAMP %s %dx%d -> 目标 %dx%d 实际 %dx%d（可用 %dx%d）", w->metaObject()->className(),
+			     before.width(), before.height(), target.width(), target.height(), after.width(),
+			     after.height(), avail.width(), avail.height());
+}
+
 class AndroidInputFilter : public QObject {
 public:
 	explicit AndroidInputFilter(QObject *parent = nullptr) : QObject(parent)
@@ -1075,6 +1129,11 @@ protected:
 				geo.width(), geo.height(), int(flags.testFlag(Qt::Popup)), int(flags.testFlag(Qt::Tool)),
 				int(flags.testFlag(Qt::Dialog)), int(pw->isVisible()),
 				int(qApp->activePopupWidget() == pw));
+
+			/* B 方案：顶层窗口显示后统一压进屏幕。只对 Show 做（Hide/Close/Expose 不需要），
+			 * 并且延后一拍等布局跑完，见 clampTopLevelToScreen 的注释。 */
+			if (ev->type() == QEvent::Show)
+				QTimer::singleShot(0, pw, [pw] { clampTopLevelToScreen(pw); });
 			break;
 		}
 		case QEvent::Gesture: {
