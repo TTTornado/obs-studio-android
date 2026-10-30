@@ -55,6 +55,7 @@
 #include <QTimer>
 #include <QScreen> // B 方案：顶层对话框压进 availableGeometry 时要完整类型
 #include <QScroller> // 单指滑动滚动（QScroller）
+#include <QLayout> // clamp 里要 layout()->activate() / minimumSize() 重算
 #endif
 
 #include <chrono>
@@ -1036,7 +1037,78 @@ static void clampTopLevelToScreen(QWidget *w)
 		return; // 本来就装得下，不动
 
 	w->resize(target);
-	const QSize after = w->size(); // resize 可能被最小尺寸挡住，这里取实际值
+	QSize after = w->size(); // resize 可能被最小尺寸挡住，这里取实际值
+
+	/* 第一次压不下去，说明对话框的最小高度大于屏幕可用高。实测「添加源」时踩过三层，
+	 * 记录在这里免得以后再摸一遍：
+	 *
+	 * ① .ui 里写死 minimumHeight（OBSBasicSourceSelect.ui 的 sourceTypeList 是 460）；
+	 * ② 布局在首次 show 时把**窗口自己的 minimumSize** 设成布局最小尺寸
+	 *    （QLayout 默认 SetDefaultConstraint），QWidget::resize() 被它夹住 ——
+	 *    光改子控件，窗口尺寸一点不动（实测：日志说"放宽 1 个"，尺寸仍停在 478）；
+	 * ③ QLayout 算最小尺寸走 qSmartMinSize()（widgets/kernel/qlayoutengine.cpp:321-333）：
+	 *    sizePolicy 没有 ShrinkFlag 时取 max(sizeHint, minimumSizeHint)，sizeHint 按内容算。
+	 *
+	 * 现在只做 ② 的对策（清窗口最小尺寸 + SetNoConstraint），**不动任何子控件**。
+	 * 依据：设置对话框实测「80 个滚动区里只放宽了 1 个，尺寸照样从 512 压到 377」
+	 * ⇒ 起作用的应该是这两步，而不是放宽子控件。本次改动就是在验证这一点。
+	 *
+	 * 判据看 CLAMP-FIT 行里的「布局最小高」：它大于目标高度就说明内容装不下、会被裁
+	 * （底部按钮可能跑出可视区）。设置对话框有 per-page QScrollArea 兜底；
+	 * 「添加源」没有 —— 若那里报 layoutMinH > 目标高，就说明必须额外处理。 */
+	if (after.height() > target.height()) {
+		/* 谁最占高度：按 minimumSizeHint 取前 5 名打出来。万一这次还是压不下去，
+		 * 这五行能直接指出下一个该松手的控件，不用再猜。 */
+		int topH[5] = {0, 0, 0, 0, 0};
+		QString topD[5];
+		for (QWidget *c : w->findChildren<QWidget *>()) {
+			const int h = c->minimumSizeHint().height();
+			if (h <= 0)
+				continue;
+			const QString d = QStringLiteral("%1/%2 minH=%3 sizeHint=%4")
+						  .arg(QString::fromLatin1(c->metaObject()->className()),
+						       c->objectName())
+						  .arg(c->minimumHeight())
+						  .arg(c->sizeHint().height());
+			for (int k = 0; k < 5; ++k) {
+				if (h > topH[k]) {
+					for (int m = 4; m > k; --m) {
+						topH[m] = topH[m - 1];
+						topD[m] = topD[m - 1];
+					}
+					topH[k] = h;
+					topD[k] = d;
+					break;
+				}
+			}
+		}
+		for (int k = 0; k < 5; ++k) {
+			if (topH[k] > 0)
+				obsAndroidDisplayLog("CLAMP-BIG %d. minHint=%d  %s", k + 1, topH[k],
+						     topD[k].toUtf8().constData());
+		}
+
+		const QSize oldMin = w->minimumSize();
+		w->setMinimumSize(QSize(0, 0));
+		int layoutMinH = -1;
+		if (QLayout *lay = w->layout()) {
+			/* 默认的 SetDefaultConstraint 会在 activate() 时把布局最小尺寸再推回
+			 * 窗口身上（实测 643x478 -> 643x478，白清）。关掉这条约束才解得开。 */
+			lay->setSizeConstraint(QLayout::SetNoConstraint);
+			lay->activate();
+			layoutMinH = lay->minimumSize().height();
+		}
+
+		w->resize(target);
+		after = w->size();
+		obsAndroidDisplayLog(
+			"CLAMP-FIT %s：窗口最小尺寸 %dx%d -> %dx%d，布局最小高 %d，结果 %dx%d（目标高 %d）%s",
+			w->metaObject()->className(), oldMin.width(), oldMin.height(),
+			w->minimumSize().width(), w->minimumSize().height(), layoutMinH, after.width(),
+			after.height(), target.height(),
+			layoutMinH > target.height() ? "  <<< 内容装不下，可能被裁" : "");
+	}
+
 	w->move(avail.center() - QPoint(after.width() / 2, after.height() / 2));
 
 	obsAndroidDisplayLog("CLAMP %s %dx%d -> 目标 %dx%d 实际 %dx%d（可用 %dx%d）", w->metaObject()->className(),
