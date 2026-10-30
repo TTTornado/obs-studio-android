@@ -21,6 +21,32 @@
 
 #include <qt-wrappers.hpp>
 
+#ifdef __ANDROID__
+#include "OBSAndroidDisplay.hpp"
+#include <QTimer>
+#include <QToolBar>
+
+void OBSBasic::ResizeAndroidDocks()
+{
+	/* Keep all five panels visible. Reserve room for the complete touch
+	 * toolbars, then share the remaining width between the bottom panels. */
+	const int toolbarWidth = qMax(ui->scenesToolbar->sizeHint().width(), ui->sourcesToolbar->sizeHint().width());
+	const int side = qMax(toolbarWidth + 8, width() * 28 / 100);
+	const int rest = qMax(1, width() - side);
+	resizeDocks({ui->scenesDock, ui->sourcesDock}, {side, side}, Qt::Horizontal);
+	resizeDocks({ui->mixerDock, ui->transitionsDock, controlsDock},
+		    {rest * 35 / 100, rest * 25 / 100, rest * 40 / 100}, Qt::Horizontal);
+
+	/* Give spare height to the preview without overriding content minima. */
+	const int bottom = qMax(ui->mixerDock->minimumSizeHint().height(),
+				qMax(ui->transitionsDock->minimumSizeHint().height(),
+				     controlsDock->minimumSizeHint().height()));
+	resizeDocks({ui->mixerDock, ui->transitionsDock, controlsDock}, {bottom, bottom, bottom}, Qt::Vertical);
+	obsAndroidDisplayLog("Android layout: side=%d bottom=%d preview=%dx%d", side, bottom,
+			     ui->preview->width(), ui->preview->height());
+}
+#endif
+
 void setupDockAction(QDockWidget *dock)
 {
 	QAction *action = dock->toggleViewAction();
@@ -97,6 +123,10 @@ void OBSBasic::on_resetDocks_triggered(bool force)
 
 	int sideDockWidth = std::min(width() * 30 / 100, 280);
 	resizeDocks({ui->scenesDock, ui->sourcesDock}, {sideDockWidth, sideDockWidth}, Qt::Horizontal);
+
+#ifdef __ANDROID__
+	QTimer::singleShot(0, this, &OBSBasic::ResizeAndroidDocks);
+#endif
 
 	activateWindow();
 }
