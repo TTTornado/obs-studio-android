@@ -805,11 +805,25 @@ static bool nikon_run_once(struct nikon_source *s, bool *perm_requested, int fai
 			blog(LOG_WARNING, "nikon: JPEG 头解析失败：%s", tjGetErrorStr());
 			continue;
 		}
+		/* 坏 JPEG 头能给出 65535x65535 ⇒ need 能到 17GB。uvc-input.c 那边踩过同一个坑
+		 * （那里有更详细的注释），这里按同样的上限先挡掉。 */
+		if (jw > 8192 || jh > 8192) {
+			s->frames_dropped++;
+			blog(LOG_WARNING, "nikon: JPEG 尺寸异常 %dx%d，丢帧", jw, jh);
+			continue;
+		}
 		const size_t need = (size_t) jw * (size_t) jh * 4;
 		if (need > bgra_size) {
 			bfree(bgra);
 			bgra = bmalloc(need);
-			bgra_size = need;
+			/* 分配失败时把 bgra_size 归零：以前无条件写 need，下一帧 need 不再
+			 * 大于 bgra_size 就不会重试分配，tjDecompress2 直接往 NULL 写。 */
+			bgra_size = bgra ? need : 0;
+		}
+		if (!bgra) {
+			s->frames_dropped++;
+			blog(LOG_WARNING, "nikon: BGRA 缓冲分配失败（%zu 字节），丢帧", need);
+			continue;
 		}
 		if (tjDecompress2(tj, jpeg, jpeg_len, bgra, jw, jw * 4, jh, TJPF_BGRA, 0) != 0) {
 			s->frames_dropped++;

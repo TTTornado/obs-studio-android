@@ -20,6 +20,8 @@
 
 #include "obs-android.h"
 
+#include <stdatomic.h>
+
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -253,11 +255,31 @@ void obs_key_combination_to_str(obs_key_combination_t combination, struct dstr *
  * 线程。这里就是一个对齐指针的写/读，C 里等价于 relaxed store/load；真要插拔设备时
  * 变化的是 Java 侧的快照，不是这个指针，所以不加锁是安全的，加 os_mutex 反而要在
  * 每条包装函数的错误路径上解锁、更容易出错。 */
-static const struct obs_android_usb_host *usb_host;
+/* 下面四张宿主表（usb/audio/camera/screen）的存储方式统一说明，后面不再重复：
+ *
+ * 以前存的是**借用指针** —— 调用方（Java 桥）注册进来的结构体由它自己持有，
+ * libobs 既不拷贝也不持引用，而文档只写了"启动时注册、退出前注销"。于是壳在另一个
+ * 线程 set(NULL) 之后把结构体释放掉，这边读到的就是悬垂指针（screen 的 read_audio
+ * 明确跑在插件音频线程上，和 setter 之间没有任何同步）。
+ *
+ * 现在按值拷进 libobs 自己的 static 存储，指针本身也改成原子：
+ *   * 调用方随时可以释放它自己那份，libobs 不再借用；
+ *   * 指针读写不再是数据竞争 —— 以前注释说"等价于 relaxed store/load"，但非 _Atomic
+ *     对象的并发读写是 C11 未定义行为，relaxed 原子至少保证不撕裂且行为有定义。
+ *
+ * 契约不变：启动时注册、退出前注销。重新注册与并发读之间不保证看到一致的快照，
+ * 但那种用法本来就不在支持范围内。 */
+static struct obs_android_usb_host usb_host_store;
+static _Atomic(const struct obs_android_usb_host *) usb_host;
 
 void obs_android_set_usb_host(const struct obs_android_usb_host *host)
 {
-	usb_host = host;
+	if (host) {
+		usb_host_store = *host;
+		atomic_store_explicit(&usb_host, &usb_host_store, memory_order_release);
+	} else {
+		atomic_store_explicit(&usb_host, NULL, memory_order_release);
+	}
 	blog(LOG_INFO, "obs-android: USB 总线%s（回调 %s）", host ? "已注册" : "已注销",
 	     host ? "就位" : "无");
 }
@@ -324,11 +346,17 @@ void obs_android_usb_close(int fd)
 
 /* 指针的读写与 USB 总线同一套取舍：注册只发生在 App 启动/退出，读发生在视频线程与
  * UI 线程，等价于 relaxed store/load；真正会变的"设备清单"在 Java 侧，不在这个指针里。 */
-static const struct obs_android_audio_host *audio_host;
+static struct obs_android_audio_host audio_host_store;
+static _Atomic(const struct obs_android_audio_host *) audio_host;
 
 void obs_android_set_audio_host(const struct obs_android_audio_host *host)
 {
-	audio_host = host;
+	if (host) {
+		audio_host_store = *host;
+		atomic_store_explicit(&audio_host, &audio_host_store, memory_order_release);
+	} else {
+		atomic_store_explicit(&audio_host, NULL, memory_order_release);
+	}
 	blog(LOG_INFO, "obs-android: 音频总线%s", host ? "已注册" : "已注销");
 }
 
@@ -375,11 +403,17 @@ bool obs_android_audio_has_permission(void)
 
 /* 指针读写与上面两条总线同一套取舍：注册只发生在 App 启动/退出，读发生在视频线程与 UI 线程，
  * 等价于 relaxed store/load。 */
-static const struct obs_android_camera_host *camera_host;
+static struct obs_android_camera_host camera_host_store;
+static _Atomic(const struct obs_android_camera_host *) camera_host;
 
 void obs_android_set_camera_host(const struct obs_android_camera_host *host)
 {
-	camera_host = host;
+	if (host) {
+		camera_host_store = *host;
+		atomic_store_explicit(&camera_host, &camera_host_store, memory_order_release);
+	} else {
+		atomic_store_explicit(&camera_host, NULL, memory_order_release);
+	}
 	blog(LOG_INFO, "obs-android: 相机总线%s", host ? "已注册" : "已注销");
 }
 
@@ -424,11 +458,17 @@ bool obs_android_camera_capture_allowed(void)
 
 /* 指针读写与前三条总线同一套取舍：注册只发生在 App 启动/退出，读发生在视频线程与 UI 线程，
  * 等价于 relaxed store/load。真正会变的是 Java 侧那个静态令牌字段，不在这个指针里。 */
-static const struct obs_android_screen_host *screen_host;
+static struct obs_android_screen_host screen_host_store;
+static _Atomic(const struct obs_android_screen_host *) screen_host;
 
 void obs_android_set_screen_host(const struct obs_android_screen_host *host)
 {
-	screen_host = host;
+	if (host) {
+		screen_host_store = *host;
+		atomic_store_explicit(&screen_host, &screen_host_store, memory_order_release);
+	} else {
+		atomic_store_explicit(&screen_host, NULL, memory_order_release);
+	}
 	blog(LOG_INFO, "obs-android: 屏幕总线%s", host ? "已注册" : "已注销");
 }
 

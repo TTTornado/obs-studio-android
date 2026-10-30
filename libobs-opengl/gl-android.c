@@ -299,6 +299,13 @@ bool gl_platform_init_swapchain(struct gs_swap_chain *swap)
 		blog(LOG_INFO, "Android 窗口面色彩空间查不到: %s", egl_error_str());
 	}
 
+	/* 关掉 vsync 阻塞。桌面两个 EGL 后端都显式设 0（gl-x11-egl.c:528、
+	 * gl-wayland-egl.c:335）；Android 默认 interval=1，eglSwapBuffers 会等 vsync
+	 * （最长约 16.7ms），而它跑在 device_present 里、持着 obs 的全局 graphics 锁 ——
+	 * 等于把整条渲染线程的节拍压死在刷新率上。失败只告警，不影响功能。 */
+	if (!eglSwapInterval(plat->display, 0))
+		blog(LOG_WARNING, "eglSwapInterval(0) 失败（%s），渲染可能被 vsync 限速", egl_error_str());
+
 	return true;
 }
 

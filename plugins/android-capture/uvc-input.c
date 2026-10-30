@@ -1113,6 +1113,10 @@ struct uvc_xfer_pipe {
 	struct libusb_transfer *err[XFER_IN_FLIGHT]; /* 完成但状态非 COMPLETED 的（状态读 x->status） */
 	int err_head;
 	int err_tail;
+	/* 取消完成计数。以前 CANCELLED 在回调里被直接丢弃，于是拆会话时无从判断
+	 * "取消到底收回来没有"，只能固定泵几轮就当收完 —— 那是下面 out: 那个 UAF 的根。
+	 * done_tail / err_tail / cancelled 三者都是单调计数，加起来就是"收到的完成总数"。 */
+	int cancelled;
 	int error; /* 不可恢复：NO_DEVICE 或错误率持续超标（拆会话原因码），0 = 正常 */
 
 	/* 瞬时错误容错（Linux uvcvideo 语义）：滑动窗口错误率 + 重提交统计 */
@@ -1132,7 +1136,11 @@ static void LIBUSB_CALL uvc_bulk_cb(struct libusb_transfer *x)
 	} else if (x->status == LIBUSB_TRANSFER_NO_DEVICE) {
 		if (!p->error)
 			p->error = x->status; /* 真拔线：立即拆会话 */
-	} else if (x->status != LIBUSB_TRANSFER_CANCELLED) {
+	} else if (x->status == LIBUSB_TRANSFER_CANCELLED) {
+		/* 必须记账：out: 里要靠它判断"取消是否已经全部收回"。
+		 * 不记账就只能靠固定超时猜，设备卡死时猜错就是在 libusb 内部留悬垂传输。 */
+		p->cancelled++;
+	} else {
 		/* 瞬时错误（IO/STALL/OVERFLOW/TIMED_OUT）：不拆会话，挂错误环，
 		 * 主循环原地重提交（平板 xHCI 路径丢字节是环境因素，软件治不了根，
 		 * 靠容错把流撑住——真机：帧少几十字节、部分帧频出） */
@@ -1150,6 +1158,7 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 	tjhandle tj = NULL;
 	bool streaming = false;
 	bool progress = false;
+	int submitted = 0; /* 成功提交的传输数：out: 里据此判断取消是否收齐 */
 	struct uvc_xfer_pipe pipe = {0};
 	struct libusb_transfer *xfers[XFER_IN_FLIGHT] = {0};
 	d.chosen = -1;
@@ -1406,6 +1415,7 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 			set_status(s, "USB 异步读提交失败（%d）", sr);
 			goto out;
 		}
+		submitted++;
 	}
 
 	streaming = true;
@@ -1909,21 +1919,38 @@ static bool uvc_run_once(struct uvc_source *s, bool *perm_requested)
 	}
 
 out:
-	/* 传输必须先取消、回收、释放，再 release/close——否则在飞传输碰已关句柄 */
+	/* 传输必须先取消、回收、释放，再 release/close——否则在飞传输碰已关句柄。
+	 *
+	 * libusb 的契约是：必须**收到完成回调之后**才能 libusb_free_transfer()，取消也一样
+	 * （回调里状态是 LIBUSB_TRANSFER_CANCELLED）。以前这里固定泵 20×50ms 就无条件 free，
+	 * 设备卡死时取消根本收不回来 ⇒ 在 libusb 内部留了悬垂传输，随后 libusb_close
+	 * 还会碰它（UAF）。现在按"完成回调计数"泵事件：收齐了才释放；超时就**故意泄漏**
+	 * 传输和缓冲（它们仍被 libusb 持有），宁可漏一点内存也不碰已释放的句柄。 */
 	for (int i = 0; i < XFER_IN_FLIGHT; i++)
 		if (xfers[i])
 			libusb_cancel_transfer(xfers[i]); /* 未提交过的返回 NOT_FOUND，无害 */
-	if (xfers[0] && d.ctx) {
-		/* 泵几轮把 CANCELLED 完成态收回来（回调在本线程跑，直接收） */
-		struct timeval tv = {0, 50000};
-		for (int k = 0; k < 20; k++)
+
+	const int done_before = pipe.done_tail + pipe.err_tail + pipe.cancelled;
+	if (d.ctx && submitted > 0) {
+		struct timeval tv = {0, 20000};
+		for (int k = 0; k < 250; k++) { /* 最多约 5 秒 */
+			if (pipe.done_tail + pipe.err_tail + pipe.cancelled - done_before >= submitted)
+				break;
 			libusb_handle_events_timeout(d.ctx, &tv);
-	}
-	for (int i = 0; i < XFER_IN_FLIGHT; i++) {
-		if (xfers[i]) {
-			bfree(xfers[i]->buffer);
-			libusb_free_transfer(xfers[i]);
 		}
+	}
+
+	const int drained = pipe.done_tail + pipe.err_tail + pipe.cancelled - done_before;
+	if (drained >= submitted) {
+		for (int i = 0; i < XFER_IN_FLIGHT; i++) {
+			if (xfers[i]) {
+				bfree(xfers[i]->buffer);
+				libusb_free_transfer(xfers[i]);
+			}
+		}
+	} else {
+		blog(LOG_WARNING, "uvc: 只收回 %d/%d 个传输，其余故意泄漏（设备可能已卡死）", drained,
+		     submitted);
 	}
 	if (tj)
 		tjDestroy(tj);

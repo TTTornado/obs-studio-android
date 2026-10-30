@@ -293,12 +293,16 @@ static int enum_cameras(ACameraManager *manager, struct camera2_info *out, int m
 		struct camera2_info *c = &out[n];
 		memcpy(c->id, safe_id, sizeof(c->id));
 		if (raw_id) {
-			memcpy(c->raw, raw_id, sizeof(c->raw));
-			c->raw[sizeof(c->raw) - 1] = 0;
-			if (strlen(raw_id) >= sizeof(c->raw))
+			/* raw_id 是 "0"/"1" 这类短串。以前用 memcpy(..., sizeof(c->raw)) 会从
+			 * 字符串结尾之后继续读最多 CAMERA_ID_LEN-1 字节（越界读堆），而且
+			 * strlen 的长度判断还写在 memcpy 之后。改成按长度拷、先判长度。 */
+			const size_t raw_len = strlen(raw_id);
+			if (raw_len >= sizeof(c->raw))
 				blog(LOG_WARNING,
-				     "android-camera: 相机 id 长度超过 %d，被截断 —— 这个 id 开不了设备，"
-				     "只能换台相机（CAMERA_ID_LEN 加大即可，不是设备问题）", CAMERA_ID_LEN);
+				     "android-camera: 相机 id 长度 %d 超过 %d，被截断 —— 这个 id 开不了设备，"
+				     "只能换台相机（CAMERA_ID_LEN 加大即可，不是设备问题）", (int) raw_len,
+				     CAMERA_ID_LEN);
+			snprintf(c->raw, sizeof(c->raw), "%s", raw_id);
 		} else {
 			c->raw[0] = 0;
 		}

@@ -996,9 +996,9 @@ std::vector<UpdateBranch> OBSApp::GetBranches()
  *
  * 背景：OBS 的对话框尺寸是按桌面设计的 —— 添加源 1040x620、设置 981x730、
  * 高级音频 1100x340、滤镜 861x726 …，而这块手机横屏的逻辑尺寸只有 873x393，
- * 于是底部按钮和右侧内容直接落在屏外、点不到。原作者对
- * OBSBasicFilters / OBSBasicSettings / OBSYoutubeActions 逐个在 showEvent 里
- * "收高度"处理过，剩下的（包括最常用的"添加源"）没管。
+ * 于是底部按钮和右侧内容直接落在屏外、点不到。之前零散地在几个对话框的 showEvent
+ * 里"收高度"处理过（OBSBasicSettings 是上游自带，OBSBasicFilters 是本移植早期加的），
+ * 但都只收高度、且没覆盖最常用的"添加源"。
  *
  * 这里改成全局兜底：任何顶层窗口显示后，只要比可用区大就压到可用区并居中。
  * 覆盖全部对话框，以后新增的也自动受益。
@@ -1027,6 +1027,17 @@ static void clampTopLevelToScreen(QWidget *w)
 	const QSize maxSize(qMax(320, avail.width() - margin * 2), qMax(240, avail.height() - margin * 2));
 
 	const QSize before = w->size();
+
+	/* 满屏窗不要压。OBSProjector::SetMonitor 在 Android 上直接
+	 * setGeometry(primaryScreen()->geometry())，尺寸与屏幕几何**完全相等**；
+	 * 压到 avail-16 再居中会在投影仪/Multiview 四周留一圈黑边。
+	 *
+	 * 判据必须用"相等"而不是"不小于"：后者会把 981x512 的设置对话框也当成满屏窗
+	 * （它宽高同样都超过 873x393），实测那样设置对话框完全不被压缩、底部按钮整行消失。 */
+	const QRect scrGeo = scr->geometry();
+	if (w->isFullScreen() || before == scrGeo.size())
+		return;
+
 	QSize target = before;
 	if (target.width() > maxSize.width())
 		target.setWidth(maxSize.width());
@@ -1109,7 +1120,12 @@ static void clampTopLevelToScreen(QWidget *w)
 			layoutMinH > target.height() ? "  <<< 内容装不下，可能被裁" : "");
 	}
 
-	w->move(avail.center() - QPoint(after.width() / 2, after.height() / 2));
+	/* 装不下时别居中：居中会算出负的 y，标题栏跑出屏外、底部依旧点不到。
+	 * 改成贴左上角，至少标题栏和上半部分是可用的。 */
+	if (after.width() > avail.width() || after.height() > avail.height())
+		w->move(avail.topLeft());
+	else
+		w->move(avail.center() - QPoint(after.width() / 2, after.height() / 2));
 
 	obsAndroidDisplayLog("CLAMP %s %dx%d -> 目标 %dx%d 实际 %dx%d（可用 %dx%d）", w->metaObject()->className(),
 			     before.width(), before.height(), target.width(), target.height(), after.width(),
@@ -1137,7 +1153,14 @@ static void clampTopLevelToScreen(QWidget *w)
  * 场景/源列表不受影响 —— 那两个有拖拽排序，单指拖必须留给拖拽。 */
 static void enableFlickScroll(QWidget *w)
 {
-	if (!w)
+	if (!w || !w->isWindow())
+		return;
+
+	/* 排除表必须和 clampTopLevelToScreen 保持一致。尤其 Popup：QComboBox 的弹层
+	 * （QComboBoxPrivateContainer）是 Qt::Popup，给它挂 TouchGesture 会改变它的
+	 * 触摸/鼠标合成行为 —— 而那正是 P-8 补丁（组合框弹层被松手打死）刚修好的链路。 */
+	const Qt::WindowFlags f = w->windowFlags();
+	if (f.testFlag(Qt::Popup) || f.testFlag(Qt::ToolTip))
 		return;
 
 	const QList<QAbstractScrollArea *> areas = w->findChildren<QAbstractScrollArea *>();
