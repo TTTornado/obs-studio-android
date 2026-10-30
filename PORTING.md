@@ -26,7 +26,7 @@ git log --oneline
 | FFmpeg | **8.0.3** | OBS 33.0 要求 ≥ 8.0（32.2.1 时代是 7.1.3） |
 | Android SDK | build-tools 36.0.0 / platform android-35 | 与上游脚本一致 |
 | 目标 ABI / API | arm64-v8a / API 29 | 只做真机 |
-| Qt | 目标 6.9.3 / CI 试编 6.7.3 | 见下方"Qt 的坑" |
+| Qt | **6.9.3**（Android + 桌面） | 与原作者环境一致；Android 套件从 aqt 的 `all_os` 分类装，见下方 |
 
 ---
 
@@ -37,7 +37,7 @@ git log --oneline
 - 14 个第三方依赖的交叉编译（`android/deps-android/`）
 - libobs / libobs-opengl(GLES) / 全部 `android-*` 采集插件的**编译与链接**
 - 产出 `libobs.so` 与各插件 `.so` 作为 artifact
-- **Qt 前端编译**（Qt 6.7.3）与 **APK 打包 + debug 签名**，产出可 sideload 的 APK
+- **Qt 前端编译**（Qt 6.9.3）与 **APK 打包 + debug 签名**，产出可 sideload 的 APK
 
 **不覆盖**：
 
@@ -61,11 +61,19 @@ ENABLE_FRONTEND=ON QT_DIR=~/Qt/6.9.3/android_arm64_v8a \
   NDK=$ANDROID_NDK_ROOT bash android/compile-check.sh
 
 # 4) 出可安装的 APK（构建 + androiddeployqt + apksigner）
-QT_DIR=~/Qt/6.7.3/android_arm64_v8a \
-  QT_HOST_PATH=~/Qt/6.7.3/gcc_64 \
+QT_DIR=~/Qt/6.9.3/android_arm64_v8a \
+  QT_HOST_PATH=~/Qt/6.9.3/gcc_64 \
   NDK=$ANDROID_NDK_ROOT ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT \
   bash android/build-apk.sh
 # 产物：OBS-Android-arm64-v8a-<mmdd-HHMM>.apk
+```
+
+**装 Qt 6.9.3 的命令**（Android 套件不在 `linux_x64/android/`，见下节）：
+
+```bash
+pip install aqtinstall
+aqt install-qt all_os android 6.9.3 android_arm64_v8a   # Android 套件
+aqt install-qt linux desktop 6.9.3 linux_gcc_64         # 桌面宿主（提供 androiddeployqt）
 ```
 
 `fetch.sh` 的代理是**可选**的：本机开发设 `OBS_PROXY=http://127.0.0.1:7892`，CI 直连留空。
@@ -118,45 +126,60 @@ CMake Error at libobs/cmake/obs-core-modules.cmake:4 (target_sources):
 
 ---
 
-## Qt 的坑（为什么 CI 用 6.7.3 而不是 6.9.3）
+## Qt 套件怎么装（6.8+ 的 Android 包在 `all_os` 分类）
 
-Qt 官方公开镜像上，**Android 套件最新只到 6.7.3**：
+**关键事实：Qt 6.8 起，Android 套件不在 `linux_x64/android/` 了。**
 
+| 位置 | 状态 |
+|---|---|
+| `online/qtsdkrepository/linux_x64/android/` | ❌ 冻结在 **6.7.3**（2024-09-24） |
+| `online/qtsdkrepository/all_os/android/` | ✅ 持续更新（6.8 → 6.12） |
+| `online/qtsdkrepository/linux_x64/desktop/` | ✅ 仍在更新，桌面套件照旧 |
+
+所以这两条命令的结果完全不同：
+
+```bash
+aqt list-qt linux android      → 5.9.0 … 6.7.3    # 看不到 6.8+，会误判"6.9.3 拿不到"
+aqt list-qt all_os android     → … 6.9.3 … 6.12    # 真正的位置
 ```
-aqt list-qt linux android              → 5.9.0 … 6.7.3      （没有 6.8/6.9）
-aqt list-qt linux desktop --arch 6.9.3 → linux_gcc_64       （桌面版有 6.9.3）
+
+装法：
+
+```bash
+aqt install-qt all_os android 6.9.3 android_arm64_v8a   # Android 套件
+aqt install-qt linux desktop 6.9.3 linux_gcc_64         # 桌面宿主（提供 androiddeployqt）
 ```
 
-本移植的目标是 Qt 6.9.3，但 Android 套件拿不到。于是用 6.7.3 试编，实测结果是：
+aqt 原生支持 `all_os` + `android`（`aqt/metadata.py` 里
+`TARGETS_FOR_HOST["all_os"] = ["wasm", "qt", "android"]`），目录名会拼成
+`qt6_693/qt6_693_arm64_v8a`，与服务器实际结构一致。
 
-> **451 个前端编译目标里，只有 1 处编不过。**
-
-```
-frontend/plugin-manager/InstalledPluginRow.cpp:111: error: no matching member function for call to 'arg'
-    ...arg(kLegacyPluginInfoLink)      // 类型是 std::string_view
-```
-
-`QString::arg` 的 `std::string_view` 重载是 Qt 6.8 才加的，上游按 6.9 写。已在源码里用
-`QString::fromUtf8(...)` 显式转换（6.7/6.8/6.9 行为一致，不需要 `#if`）。
-
-**结论：Qt 6.7.3 足够编过并打出 APK**，不必为了"能编"去折腾 Qt 账号。
-代价是运行时行为与 6.9.3 可能有差异（控件样式、字体度量、`QStyle` 细节），
-而我们那套触屏适配（`devicePixelRatioF` 坐标映射、QSS 注入 `min-height: 48px`）
-恰恰依赖这些——**真机上要专门看一眼布局有没有走样**。
-
-> 曾经有个 `qt-probe` job 专门查这件事，结论已定（公开镜像最高 6.7.3），已移除。
-> 以后想复查 Qt 6.8/6.9 有没有上镜像，跑一条命令即可：
->
-> ```bash
-> pip install aqtinstall && aqt list-qt linux android
-> ```
+> ⚠️ 早期我曾据此误判"Qt 6.9.3 拿不到"，于是用 6.7.3 试编并为此打了一堆补丁。
+> 后来发现包就在 `all_os` 下，已全部切回 6.9.3（见下方"从 6.7.3 切回 6.9.3 撤掉了什么"）。
 
 ---
 
-## APK 打包的坑（Qt 6.7.3 的 Gradle 工具链太旧）
+## 从 6.7.3 切回 6.9.3 撤掉了什么
 
-Qt 6.7.3 自带 **AGP 7.4.1**（官方只测到 compileSdk 33），和这台 CI 镜像上的
-Android SDK 平台不兼容。两处踩坑：
+用 6.7.3 期间打的四个补丁，切回 6.9.3 后的处置：
+
+| 补丁 | 处置 | 理由 |
+|---|---|---|
+| `QT_ANDROID_TARGET_SDK_VERSION` 35 → 34 | ✅ **撤掉，回到 35** | 6.7.3 不支持 edge-to-edge，触摸坐标会整体偏移一个状态栏高度；6.9.3 支持 |
+| `android.aapt2FromMavenOverride` | ✅ **撤掉** | 6.7.3 的 AGP 7.4.1 太旧，解析不了新版平台 jar；6.9.3 的 AGP 够新 |
+| `InstalledPluginRow.cpp` 的 `QString::fromUtf8` | ✅ **还原成上游写法** | 6.7.3 的 `QString::arg` 没有 `std::string_view` 重载（6.8 才有）；现在该文件与上游 33.0.0 完全一致 |
+| 收敛 SDK 平台到 android-35 | ⚠️ **保留** | 纯防御：保证 compileSdk 与 targetSdk 都是 35。若碍事可删 |
+
+代价是前端对 Qt 6.9 的编译期硬依赖只有 1 行（就是上面那条 `QString::arg`），
+说明当时用 6.7.3 其实也就差这一点——但**运行时**的 edge-to-edge 差异才是真问题。
+
+---
+
+## APK 打包的坑（Qt 6.7.3 时代踩的，换 6.9.3 后多数已消失）
+
+> 下面两条是**用 Qt 6.7.3 期间**踩的。它的 Gradle 工具链（AGP 7.4.1）太旧，
+> 和现代 Android SDK 平台不兼容。换成 Qt 6.9.3 后第 2 条已不需要（补丁已撤），
+> 第 1 条保留为防御。记录在此，以防将来又退回 6.7.x。
 
 **1. `androiddeployqt` 自己挑平台，不认 `QT_ANDROID_COMPILE_SDK_VERSION`**
 
@@ -174,9 +197,10 @@ aapt2 E ApkAssets.cpp:149] Failed to load resources table in APK '.../android-35
 > Task :processReleaseResources FAILED
 ```
 
-对策是用 build-tools 里的新版 aapt2 顶替（AGP 支持该覆盖项）：
+对策（**Qt 6.7.3 专用，现已撤销**）是用 build-tools 里的新版 aapt2 顶替：
 
 ```bash
+# 若将来又退回 6.7.x，需要重新加这一行
 echo "android.aapt2FromMavenOverride=$ANDROID_SDK_ROOT/build-tools/<ver>/aapt2" \
   >> ~/.gradle/gradle.properties
 ```
@@ -223,14 +247,17 @@ Android 15 对 **targetSdk ≥ 35** 的应用强制 edge-to-edge：应用画到�
 
 原作者用 Qt 6.9.3（支持 edge-to-edge）所以没撞上；我们降到 6.7.3 才暴露。
 
-**修法**：`frontend/cmake/os-android.cmake` 里把 `QT_ANDROID_TARGET_SDK_VERSION`
-从 35 降到 **34**。系统不再强制 edge-to-edge，窗口按传统方式让出状态栏，输入与绘制
-重新对齐。本移植要用的前台服务类型（`specialUse` / `mediaProjection`）在 API 34
-就已可用，不依赖 35。
+**当时的权宜之计**：把 `QT_ANDROID_TARGET_SDK_VERSION` 从 35 降到 34 ——
+系统不再强制 edge-to-edge，输入与绘制重新对齐（真机验证：设置对话框能正常打开）。
 
-> 备选方案（保留 targetSdk 35）：在清单的 `<application>` 上加
+**最终解法**：切回 **Qt 6.9.3**，targetSdk 恢复 **35**。Qt 6.9.3 支持 edge-to-edge，
+本来就不需要这个妥协。
+
+> 备选方案（保留 targetSdk 35 且仍用 6.7.3）：在清单 `<application>` 上加
 > `android:windowOptOutEdgeToEdgeEnforcement="true"`。但它只是 Android 15 的过渡
-> 开关，Android 16 起失效，所以没采用。
+> 开关，**Android 16 起失效**，所以没采用。
+>
+> ⚠️ 若将来又退回 Qt 6.7.x，必须把 targetSdk 改回 34，否则触摸会再次整体偏移。
 
 ---
 
@@ -247,9 +274,11 @@ Android 15 对 **targetSdk ≥ 35** 的应用强制 edge-to-edge：应用画到�
 - [x] 补 `obs-core-modules-loader-android.c`（33.0 新增的按平台 loader）
 - [x] FFmpeg 7.1.3 → 8.0.3、补 `nlohmann_json` 3.11.3
 - [x] CI：依赖编译 + libobs/GLES/插件 编译链接验证
-- [x] Qt 6.7.3 前端编译（仅 1 行兼容改动）
 - [x] 4 个 P0：screen 死锁 / 相机旋转 / AAudio 自愈 / screen OOM
 - [x] APK 打包 + debug 签名 + artifact（`android/build-apk.sh`）
+- [x] 真机首次安装验证（Redmi 23049RAD8C / Android 15）：能启动、界面完整
+- [x] 定位并修复"触摸坐标整体偏移"（Android 15 edge-to-edge + Qt 6.7.3）
+- [x] 找到 Qt 6.9.3 Android 套件的真实位置（`all_os/android`），切回 6.9.3 并撤掉 4 个妥协补丁
 
 ### P0（尚未在真机验证）
 
@@ -264,6 +293,7 @@ Android 15 对 **targetSdk ≥ 35** 的应用强制 edge-to-edge：应用画到�
 
 ### 下一步
 
-- [ ] 从 CI artifact 下载 APK，sideload 到真机
-- [ ] 真机回归：启动 → 预览 → 录制 → 摄像头 → 屏幕采集 → 内录 → UVC → 推流
-- [ ] 重点看 Qt 6.7.3 下触屏布局有没有走样（控件尺寸/字体度量与 6.9 有差异）
+- [ ] Qt 6.9.3 构建出的 APK 装到真机，确认触摸仍然正常（回归 edge-to-edge）
+- [ ] 真机功能回归：启动 → 预览 → 录制 → 摄像头 → 屏幕采集 → 内录 → UVC → 推流
+- [ ] 相机画面方向（日志里 `渲染期旋转=N°`）
+- [ ] 上面 4 个未修的 P0

@@ -107,14 +107,8 @@ InstalledPluginRow::InstalledPluginRow(QWidget *parent, const PluginManagerWindo
 			//warningIcon->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Maximum);
 			//warningIcon->setPixmap(getWarningIcon().pixmap(16, 16));
 
-			/* Qt 6.7 的 QString::arg 没有 std::string_view 重载（Qt 6.8 起才有），
-			 * 而 kLegacyPluginInfoLink 是 std::string_view —— 上游代码是按 6.9 写的。
-			 * 这里显式转成 QString：6.7/6.8/6.9 行为一致，前端不必绑死 Qt 6.9。
-			 * 这是本移植唯一的 Qt 6.7 兼容点（CI 实测：451 个前端目标里只有这一处编不过）。 */
-			const QString legacyInfoLink = QString::fromUtf8(kLegacyPluginInfoLink.data(),
-									 qsizetype(kLegacyPluginInfoLink.size()));
 			auto legacyInfo =
-				new QLabel{QTStr("PluginManager.Status.Legacy.Description").arg(legacyInfoLink),
+				new QLabel{QTStr("PluginManager.Status.Legacy.Description").arg(kLegacyPluginInfoLink),
 					   moduleText};
 			legacyInfo->setTextInteractionFlags(Qt::LinksAccessibleByMouse);
 			legacyInfo->setOpenExternalLinks(true);

@@ -203,21 +203,27 @@ jobs:
 
   # 阶段 2：打可安装的 APK。
   #
-  # 用 Qt 6.7.3（公开镜像上 Android 套件的最新版本；6.8/6.9 拿不到）。
-  # 实测 OBS 33.0 前端对 Qt 6.9 的**编译期**硬依赖只有 1 行
-  # （InstalledPluginRow.cpp 的 QString::arg(std::string_view)），已在源码里做了兼容，
-  # 所以 6.7.3 足够出包。
+  # 用 **Qt 6.9.3** —— 与原移植作者的开发环境一致。
   #
-  # 这个 job 不再 continue-on-error：要的就是"能不能拿到一个能装的包"这个确定答案。
+  # Android 套件的获取位置要注意：Qt 6.8 起它被搬到了 aqt 的 `all_os` 分类
+  # （`linux_x64/android/` 冻结在 6.7.3，所以 `aqt list-qt linux android` 看不到 6.8+），
+  # 安装命令是 `aqt install-qt all_os android 6.9.3 android_arm64_v8a`。
+  # 桌面宿主套件（提供 androiddeployqt）仍在 `linux_x64/desktop` 下。
+  #
+  # 历史：曾误以为 6.9.3 拿不到而用 6.7.3，为此打了四个补丁。换回 6.9.3 后：
+  #   ✅ 撤掉 targetSdk 34（6.9.3 支持 edge-to-edge，触摸坐标不再偏移）
+  #   ✅ 撤掉 aapt2FromMavenOverride（6.9.3 的 AGP 够新）
+  #   ✅ 还原 InstalledPluginRow.cpp 的 QString::fromUtf8 兼容（已与上游一致）
+  #   ⚠️ 保留"收敛 Android 平台到 35"（见下，作为防御）
   apk:
-    name: 打 APK (Qt 6.7.3, arm64-v8a)
+    name: 打 APK (Qt 6.9.3, arm64-v8a)
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     # 依赖 compile job 先把 deps 缓存存下来（这里 fail-on-cache-miss 强制要求命中）。
     needs: compile
 
     env:
-      QT_VERSION: '6.7.3'
+      QT_VERSION: '6.9.3'
       QT_ROOT: ${{ github.workspace }}/.qt
 
     steps:
@@ -240,19 +246,17 @@ jobs:
           [ -d "$SDK/ndk/$NDK_VERSION" ] || { echo "::error::NDK 安装失败"; exit 1; }
           echo "NDK_ROOT=$SDK/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
 
-      # Qt 6.7.3 自带 AGP 7.4.1（官方只测到 compileSdk 33），而 androiddeployqt 会自己
-      # 扫 SDK 里的平台挑一个（deployment settings 里**没有** android-platform 字段，
-      # 我们 CMake 设的 QT_ANDROID_COMPILE_SDK_VERSION 在这条路上不被采纳）。
+      # 收敛 SDK 里的平台到 android-35（= targetSdk）。
       #
-      # 实测两轮：
-      #   1) 原样 → 挑到 android-36-ext19，那个 android.jar 是 preview/ext 变体，
-      #      AGP 7.4.1 的 aapt2 直接解析不了：
-      #        aapt2 E Failed to load resources table in APK '.../android-36-ext19/android.jar'
-      #        > Task :processReleaseResources FAILED
-      #   2) 卸掉 36.x 与 35-ext 后 → 又挑到 android-34-ext12（它偏好 *-ext* 变体，
-      #      排序上压过 android-35）。这次能编过，但 compileSdk 34 配 targetSdk 35 不对。
+      # 背景：androiddeployqt 会自己扫 SDK 目录挑一个平台（deployment settings 里
+      # **没有** android-platform 字段），而且偏好 *-ext* 变体 —— 实测依次挑到
+      # android-36-ext19、android-34-ext12，都不是我们想要的。
       #
-      # 所以把 36.x / 35-ext* / 34-ext* 全卸掉，只留 android-35（正好是 targetSdk）。
+      # 这条步骤是 Qt 6.7.3 时代为了绕开 AGP 7.4.1 的 aapt2 解析问题加的。
+      # 换成 Qt 6.9.3 后 AGP 够新、未必还需要它，但**保留**：
+      #   * 它保证 compileSdk 与 targetSdk 一致（都是 35），避免 34 配 35 的错位；
+      #   * 代价只有十几秒，且失败时只影响这个 job。
+      # 如果哪天它开始碍事，可以删掉这条、直接看 Qt 6.9.3 自己挑到什么平台。
       - name: 收敛 Android 平台到 35
         run: |
           set -euo pipefail
@@ -295,35 +299,21 @@ jobs:
         run: |
           set -euo pipefail
           pip install --quiet aqtinstall
-          aqt install-qt linux android "${QT_VERSION}" android_arm64_v8a -O "${QT_ROOT}"
+          # 注意 host 参数：
+          #   Android 套件从 Qt 6.8 起搬到了 all_os 分类（linux_x64/android/ 冻结在 6.7.3）。
+          #   aqt 原生支持 all_os + android（aqt/metadata.py: TARGETS_FOR_HOST["all_os"]
+          #   = ["wasm", "qt", "android"]），目录名会拼成 qt6_693/qt6_693_arm64_v8a，
+          #   与服务器上的实际结构一致。
+          #   桌面宿主套件（提供 androiddeployqt）仍在 linux_x64/desktop 下。
+          aqt install-qt all_os android "${QT_VERSION}" android_arm64_v8a -O "${QT_ROOT}"
           aqt install-qt linux desktop "${QT_VERSION}" linux_gcc_64 -O "${QT_ROOT}"
           echo "::group::安装结果"
           ls -1 "${QT_ROOT}/${QT_VERSION}"
           echo "::endgroup::"
 
-      # Qt 6.7.3 自带 AGP 7.4.1，它捆绑的 aapt2 读不了新版平台 android.jar 的
-      # resources table（换哪个平台都一样，实测 android-36-ext19 与 android-35 都报）：
-      #
-      #   aapt2 E LoadedArsc.cpp:94] RES_TABLE_TYPE_TYPE entry offsets overlap actual entry data.
-      #   aapt2 E ApkAssets.cpp:149] Failed to load resources table in APK '.../android-35/android.jar'
-      #   > Task :processReleaseResources FAILED
-      #
-      # AGP 支持用 android.aapt2FromMavenOverride 指定外部 aapt2，于是拿 build-tools
-      # 里的新版 aapt2 顶替它。
-      # 必须写在**用户级** gradle.properties：androiddeployqt 每次都会重写工程级那份，
-      # 工程级的改动会被覆盖掉。
-      - name: 用新版 aapt2 顶替 AGP 7.4.1 自带的
-        run: |
-          set -euo pipefail
-          SDK="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
-          AAPT2="$(ls "$SDK"/build-tools/*/aapt2 2>/dev/null | sort -V | tail -1)"
-          [ -n "$AAPT2" ] || { echo "::error::找不到 aapt2"; exit 1; }
-          echo "使用 aapt2: $AAPT2"
-          "$AAPT2" version 2>&1 | sed 's/^/  /' || true
-          mkdir -p "$HOME/.gradle"
-          echo "android.aapt2FromMavenOverride=$AAPT2" >> "$HOME/.gradle/gradle.properties"
-          echo "---- ~/.gradle/gradle.properties ----"
-          cat "$HOME/.gradle/gradle.properties"
+      # 原先这里有个"用新版 aapt2 顶替 AGP 7.4.1 自带的"步骤 —— Qt 6.7.3 捆绑的
+      # AGP 太旧，解析不了新版平台 android.jar 的 resources table。换成 Qt 6.9.3 后
+      # 它自带的 AGP 足够新，该补丁不再需要，已移除。
 
       - name: 构建 + 打包 + 签名
         run: |
