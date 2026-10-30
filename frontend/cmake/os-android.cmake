@@ -170,7 +170,7 @@ else()
 endif()
 
 # 插件 .so 不进 EXTRA_LIBS（名字不以 lib 开头，androiddeployqt 会要求改名），而是由
-# .qoder/build-frontend-apk.sh 把 rundir/lib/obs-plugins/*.so 暂存到本目录的 libs/<abi>/，
+# android/build-apk.sh 把 rundir/lib/obs-plugins/*.so 暂存到本目录的 libs/<abi>/，
 # 走 androiddeployqt 的 android-package-source-directory → gradle jniLibs 那条路进 APK。
 set_target_properties(
   obs-studio

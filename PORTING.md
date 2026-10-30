@@ -4,15 +4,17 @@
 
 本仓库是 [obsproject/obs-studio](https://github.com/obsproject/obs-studio) 的一个 fork，
 在根级布局上叠加 Android 移植（原移植工作由 [cunminF](https://github.com/cunminF/OBS_for_Android) 完成）。
-上游基线是 **33.0.0**（`72e8665`），移植改动是叠在它上面的 8 个提交。
+上游基线是 **33.0.0**（`72e8665`），移植改动是叠在它上面的 32 个提交
+（`git log --oneline 33.0.0..HEAD` 看全量）。近期主线：
 
 ```
-git log --oneline
-  1a2ab29 plugins: Android 分支补 set_obs_core_modules()（33.0 新增机制）
-  7d16b16 deps: FFmpeg 7.1.3 -> 8.0.3（OBS 33.0 要求 >= 8.0）
-  ...
-  3e51aed build: add Android platform build skeleton
-  72e8665 CI: Update deps to 2026-10-23 release   ← 33.0.0
+1f7963f frontend: 首页布局与工具栏尺寸（按内容推导，修掉裁切）
+b6833e0 frontend: 对话框尺寸与单指滚动（源码级放宽 + clamp 只缩放）
+fcc7a4e fix: 整体审查后的 P0（5 处会崩/UAF + 4 处 clamp 回归 + 1 处性能）
+613f977 ci: test/** 分支也自动构建
+f76a9a8 frontend: 对话框装不下时清掉窗口最小尺寸并关掉布局反推
+...
+72e8665 CI: Update deps to 2026-10-23 release   ← 33.0.0
 ```
 
 ---
@@ -24,7 +26,7 @@ git log --oneline
 | OBS 上游基线 | **33.0.0** | `cmake/common/versionconfig.cmake` 需要 |
 | Android NDK | **30.0.16138531** | sdkmanager 可装；runner 自带的 `30.0.16248370` 不是同一个 |
 | FFmpeg | **8.0.3** | OBS 33.0 要求 ≥ 8.0（32.2.1 时代是 7.1.3） |
-| Android SDK | build-tools 36.0.0 / platform android-35 | 与上游脚本一致 |
+| Android SDK | platform android-35 | build-tools 用 runner 自带的最新版（未钉版本） |
 | 目标 ABI / API | arm64-v8a / API 29 | 只做真机 |
 | Qt | **6.9.3**（Android + 桌面） | 与原作者环境一致；Android 套件从 aqt 的 `all_os` 分类装，见下方 |
 
@@ -34,7 +36,7 @@ git log --oneline
 
 **覆盖**（`.github/workflows/android-compile.yml`）：
 
-- 14 个第三方依赖的交叉编译（`android/deps-android/`）
+- 15 个第三方依赖的交叉编译（`android/deps-android/`）
 - libobs / libobs-opengl(GLES) / 全部 `android-*` 采集插件的**编译与链接**
 - 产出 `libobs.so` 与各插件 `.so` 作为 artifact
 - **Qt 前端编译**（Qt 6.9.3）与 **APK 打包 + debug 签名**，产出可 sideload 的 APK
@@ -261,10 +263,135 @@ Android 15 对 **targetSdk ≥ 35** 的应用强制 edge-to-edge：应用画到�
 
 ---
 
-## 待办清单
+## 对话框装不下屏幕：从"硬压窗口"到"源码级放宽"
 
-见下方"移植待办"一节（本文件末尾）。原审查的完整清单在 fork 创建时的会话记录里，
-当前优先级：P0 缺陷 → APK 打包 → 真机回归。
+手机横屏的逻辑尺寸只有 **873×393**，而 OBS 的对话框是按桌面设计的：
+
+| 对话框 | 设计尺寸 | 症状 |
+|---|---|---|
+| 添加源 | 1040×620 | 宽高超屏，底部按钮和右侧内容都在屏外 |
+| 设置 | 981×730，`.ui` 写死 `minimumSize 700×512` | 被锁在 512 高，底部按钮整行看不见 |
+| 高级音频 | 1100×340 | 宽超屏 |
+
+### 走过的弯路（别重复）
+
+第一版是在 `AndroidInputFilter` 的 Show 分支做**全局兜底**：任何顶层窗口超过
+`screen()->availableGeometry()` 就 `resize` 到可用区并居中。结果一路补了五层：
+
+1. `resize` + 居中 —— 不动子控件，压不下去
+2. 把内部 `QAbstractScrollArea` 的 `minimumHeight` 压到 64 —— 还是不动
+3. 清窗口自己的 `setMinimumSize(0,0)` —— `activate()` 又把它设回来
+4. `layout()->setSizeConstraint(SetNoConstraint)` —— 终于能压了
+5. 改子控件 `sizePolicy` —— 事后证明多余
+
+**第 4 层是错的**：它造出"窗口比内容小"的不一致状态 —— 窗口压到 377，而布局仍按
+478 摆放子控件，添加源左侧列表被摆成 460 高、裁在 377 的窗口里，
+**viewport 比可视区大 ⇒ 滚动条范围算错，列表既不能滚、命中判定也错位**。
+
+### 正确做法：各对话框自己解除桌面尺寸限制
+
+`clampTopLevelToScreen` 现在只做 `resize` + 居中，**不碰任何约束**；被挡住时只打一条
+`CLAMP-BLOCKED` 日志，作为"还有哪些对话框没做源码级修复"的待办清单。
+
+**添加源**（`OBSBasicSourceSelect.cpp`）—— 两行缺一不可：
+
+```cpp
+ui->sourceTypeList->setMinimumHeight(0);
+ui->sourceTypeList->setSizeAdjustPolicy(QAbstractScrollArea::AdjustIgnored);
+```
+
+它们堵的是两条不同的路。`QLayout` 算最小尺寸走 `qSmartMinSize()`
+（`qlayoutengine.cpp:321-333`）：
+
+```cpp
+s = max(sizeHint, minimumSizeHint);      // sizePolicy 无 ShrinkFlag 时
+if (minSize.height() > 0) s = minSize;   // 非零则无条件覆盖
+```
+
+| 只做哪一行 | 460 从哪条路回来 | 布局最小高 |
+|---|---|---|
+| `setMinimumHeight(0)` | `sizeHint()`（`.ui` 把策略设成 `AdjustToContents`，跟随内容） | 460 ❌ |
+| `setSizeAdjustPolicy(AdjustIgnored)` | `minSize`（`.ui` 的 `0x460`，非零时无条件覆盖） | 460 ❌ |
+| **两行都有** | — | **~192** ✅ |
+
+> ⚠️ `AdjustIgnored` **不是**"Qt 默认值所以可删"：`OBSBasicSourceSelect.ui:160-162`
+> 显式把策略设成了 `AdjustToContents`。两种策略下 `sizeHint()` 行为完全不同
+> （`qabstractscrollarea.cpp:1426-1442`）：
+> `AdjustIgnored` → 固定 `256×192`；`AdjustToContents` → `frame + scrollbars + viewportSizeHint()`。
+
+**设置**（`OBSBasicSettings.cpp`）—— 内容本来装得下（每页自带 `QScrollArea`，
+实测布局最小高 330），只是 `.ui` 写死的 `minimumSize 700×512` 锁住了，`setMinimumSize(0,0)` 即可。
+
+真机验证（两个对话框都**一次 resize 成功**，无 `CLAMP-BLOCKED`）：
+
+```
+CLAMP OBSBasicSourceSelect 1040x620 -> 目标 857x377 实际 857x377（可用 873x393）
+CLAMP OBSBasicSettings     981x375 -> 目标 857x375 实际 857x375（可用 873x393）
+```
+
+---
+
+## 单指滚动：QScroller 与 item view 的取舍
+
+Qt 在 Android 上把单指触摸合成成鼠标事件，而 `QAbstractScrollArea` 只在 `wheelEvent`
+里滚动 —— 所以默认只有**双指拖**（Qt 合成成 `QWheelEvent`）能滚。
+
+`enableFlickScroll()` 在顶层窗口 Show 后给里面的滚动区挂 `QScroller`，按控件类型分开：
+
+| 控件类型 | 手势模式 | 实测 |
+|---|---|---|
+| `QScrollArea`（设置页） | `TouchGesture` | ✅ 正常 |
+| `QAbstractItemView`（QListWidget/QTreeView） | `LeftMouseButtonGesture` | ✅ 能滚，但**按下那一项会被选中一次** |
+
+`QAbstractItemView` 上用 `TouchGesture` **不生效**：它自己处理触摸，识别器抢不到，
+事件退回成"按住左键拖选"。添加源列表因此不滚，而且 `currentItemChanged` 接到了
+`sourceTypeSelected`，拖选每改一次当前项右边面板就刷一次，看起来像"依次点开所有项"。
+
+改用 `LeftMouseButtonGesture` 后 QScroller 会抓走鼠标并消费移动事件，拖动变滚动。
+**已知代价**：按下位置那一项仍会被选中一次（按下先到控件，QScroller 要超过阈值才接管）。
+在设置对话框左栏拖动也会切一次页 —— 对导航列表可以接受。
+
+> 试过"自己实现拖动滚动"（吃掉移动事件、直接改滚动条数值）：功能正确但不优雅 ——
+> 绕过 Qt 的机制、放弃惯性、还要为一个个案在全局输入层加逻辑。已回退。
+
+---
+
+## 首页布局：从魔数到推导
+
+dock 比例原本写死在 `OBSInit()` 里（`30%` / `20%` / `51:16:33`），现在提取成
+`OBSBasic::ResizeAndroidDocks()`（`OBSBasic_Docks.cpp`），`OBSInit` 和
+`on_resetDocks_triggered` 共用 —— 否则"重置界面"之后不会再套用。
+
+比例改成按内容推导：
+
+```cpp
+const int toolbarWidth = qMax(ui->scenesToolbar->sizeHint().width(), ...);
+const int side   = qMax(toolbarWidth + 8, width() * 28 / 100);   // 左栏至少装得下工具栏
+const int bottom = qMax(mixer/transitions/controls 的 minimumSizeHint().height());
+```
+
+工具栏按钮尺寸也改成从 `ui->transitionAdd->sizeHint()` / `iconSize()` 推导，再用 QSS
+精确控制（`border/padding` 归零，让 `min/max` 就是外尺寸），`QToolBar` 一起撑到
+`buttonSize.height()+2` 覆盖主题给的 32px 上限 —— **之前按钮设了 48×48 下限但工具栏
+高度不够，图标就被裁**。溢出按钮（`">>"`）不动：给它加尺寸会让 Qt 在算溢出时多留宽度，
+把后面的动作全收进菜单。
+
+列表行高也归位了：场景列表的 `min-height` 从 `OBSInit` 里的一次性样式表挪进
+`SceneTree::SetGridMode()`（顺手修掉"切一次网格模式样式表就被覆盖"的隐患）；
+源列表在 `SourceTreeDelegate::sizeHint()` 里夹（样式表盖不过 delegate 返回的行高）。
+
+真机结果：
+
+```
+Android toolbar: scenes=5 sources=5 button=26x28 rows=34/-1
+Android layout: side=244 bottom=135 preview=648x162
+```
+
+5 个工具栏按钮全部完整可见、不再裁切。
+
+---
+
+## 待办清单
 
 ### 已完成
 
@@ -279,21 +406,47 @@ Android 15 对 **targetSdk ≥ 35** 的应用强制 edge-to-edge：应用画到�
 - [x] 真机首次安装验证（Redmi 23049RAD8C / Android 15）：能启动、界面完整
 - [x] 定位并修复"触摸坐标整体偏移"（Android 15 edge-to-edge + Qt 6.7.3）
 - [x] 找到 Qt 6.9.3 Android 套件的真实位置（`all_os/android`），切回 6.9.3 并撤掉 4 个妥协补丁
+- [x] 全量代码审查（4 区域并行）+ 5 处会崩/UAF 修复：nikon 解码缓冲、camera2 id 越界、
+      uvc 取消后释放、`obs-android` 四张宿主表原子化、`OBSBasic_Transitions` 跨平台 ifdef
+- [x] `gl-android.c` 补 `eglSwapInterval(display, 0)`（桌面两个 EGL 后端都设了，Android 漏了）
+- [x] 对话框装不下屏幕：改成源码级放宽最小尺寸，clamp 只缩放不碰约束
+- [x] 单指滚动：`QScrollArea` 用 `TouchGesture`、`QAbstractItemView` 用 `LeftMouseButtonGesture`
+- [x] 首页布局与工具栏尺寸：从魔数改成按内容推导，修掉按钮裁切
 
-### P0（尚未在真机验证）
+### 待办
 
-- [x] `plugins/android-screen/screen-capture.c` 音频泵死锁（拆 `audio_mx` / `audio_life_mx`）
-- [x] `plugins/android-camera/camera2-input.c` sensor orientation（`obs_source_set_async_rotation`）
-- [x] `plugins/android-audio/aaudio-input.c` 拔插耳机后永久无声（线程内自愈）
-- [x] `plugins/android-screen/screen-capture.c` 全屏 RGBA 的 OOM（`async_unbuffered`）
-- [ ] `libobs-opengl/gl-subsystem.c:132` + `gl-shaderparser.c:741` GL 版本门禁矛盾
-- [ ] `libobs/obs-android.c:256/327/378/427` 4 张宿主表无原子性/生命周期协议
+**已知缺陷**
+
+- [ ] **浮动 dock 崩溃**：有源在渲染时浮动 dock → 新原生窗口销毁 Surface →
+      `makeCurrent(): no EGLSurface` → `QRhiGles2` 失败 → SIGSEGV
+      （`reason=5 (APP CRASH(NATIVE))` status=11）。倾向方案：Android 上直接去掉
+      `DockWidgetFloatable`，一并解决"浮动后找不回"
+- [ ] **嵌套子菜单坐标错位**：`视图 → 打开多视图 → 显示器 1` 点不动。Qt 报的子菜单几何
+      （`geo=692x334+163+59`）与实际绘制位置不符，点击落到父菜单。影响所有二级菜单
+      （场景列表模式 / 统计 等）；`frontend/utility/AndroidMenuPos.hpp` 只覆盖了部分场景
+- [ ] **剩余 `CLAMP-BLOCKED` 对话框**（属性 720×580 / 高级音频 1100×340 / 变换 900×280 /
+      关于 840×519 / 更新 611×526 …）逐个做源码级放宽。
+      做法：跑一遍主界面打开各个对话框，日志里每一条 `CLAMP-BLOCKED` 就是一个待修项
 - [ ] `ObsForegroundService.java` 缺 `microphone` 前台类型（Android 14+ 后台录音静默断）
 - [ ] `AndroidManifest.xml:93` `debuggable="true"` + debug keystore 签 release
 
-### 下一步
+**未做真机功能验证**
 
-- [ ] Qt 6.9.3 构建出的 APK 装到真机，确认触摸仍然正常（回归 edge-to-edge）
-- [ ] 真机功能回归：启动 → 预览 → 录制 → 摄像头 → 屏幕采集 → 内录 → UVC → 推流
-- [ ] 相机画面方向（日志里 `渲染期旋转=N°`）
-- [ ] 上面 4 个未修的 P0
+- [ ] UVC / Camera2 / 尼康 三条采集路径 —— P0 改了它们的解码缓冲、id 拷贝、传输释放，
+      只做过编译验证，需要各跑一次确认没坏
+- [ ] 录制 / 推流 / 屏幕采集 / 系统内录 / 相机方向（日志里 `渲染期旋转=N°`）
+
+**工程债**
+
+- [ ] `AndroidInputFilter`（`OBSApp.cpp`，约 500 行含 170 行注释、11 个 case）承担 5 件
+      互不相关的事：长按=右键、BACK=Escape、组合框弹层补丁(P-8)、clamp、QScroller 挂载。
+      建议拆成 4 个单责过滤器
+- [ ] 探针日志 63 处：约 20 处有长期价值、约 21 处是每事件残留。建议加
+      `OBS_ANDROID_PROBE` 运行时开关（默认关），长期项降到 `LOG_DEBUG`
+- [ ] 提取 `plugins/android-common/`：uvc 与 nikon 有 6 组逐字重复（USB 枚举、采集线程
+      三件套、JPEG→BGRA 整段…）。**复制已经造成过缺陷** —— nikon 漏了 uvc 已修好的 NULL 检查
+- [ ] 容器格式限制 5 处各自编码、预览面所有权 5 处各自实现 —— 收敛成单一入口
+- [ ] CI：缓存 key 不含 `NDK_VERSION`/`API`；`always()` 保存半成品 prebuilt 可能毒化缓存；
+      paths 漏了 `deps/**`；`.gitignore` 对 `android/deps-android/{prebuilt,src}` 无规则
+- [ ] 构建可重现性：x264/rnnoise 钉的是 `master` 分支且无 checksum；每次构建新生成 keystore；
+      `apksigner`/`aapt2` 用 `sort -V | tail -1` 取最新
