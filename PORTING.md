@@ -194,6 +194,46 @@ obs-studio`），但那一刻插件 `.so` 还没暂存，所以那次出的包**
 
 ---
 
+## 运行时坑：触摸坐标整体偏移（真机实测）
+
+**症状**：APK 装上去能正常启动、界面显示完整，但**大部分控件点不中**，只有在预览区
+拖动还能用（因为那块面积大，偏移被"吸收"了）。
+
+**定位过程**（`adb` + 移植自带的 `P8-PRESS` / `P8-REL` 探针）：
+
+```
+输入设备坐标 (1315, 395)  ->  P8-PRESS cls=QPushButton win=QMessageBox
+                              P8-REL  at=(558,182)
+```
+
+`182 × 2.75（dpr）= 500`，而那个按钮在屏幕上**真实位置是 y≈500**。也就是说：
+点在 395、Qt 认为是 500 —— **输入坐标被加了约 111 px（= 状态栏高度）的垂直偏移**。
+
+**根因**：窗口属性里是
+
+```
+pfl=... EDGE_TO_EDGE_ENFORCED ...
+layoutInDisplayCutoutMode=always
+InsetsSource type=statusBars frame=[0,0][2400,111]
+```
+
+Android 15 对 **targetSdk ≥ 35** 的应用强制 edge-to-edge：应用画到状态栏下面
+（内容从 y=0 开始），而 **Qt 6.7.3 不支持 edge-to-edge**，仍按"内容在状态栏下方"
+换算输入坐标 ⇒ 绘制与输入差了整整一个状态栏。
+
+原作者用 Qt 6.9.3（支持 edge-to-edge）所以没撞上；我们降到 6.7.3 才暴露。
+
+**修法**：`frontend/cmake/os-android.cmake` 里把 `QT_ANDROID_TARGET_SDK_VERSION`
+从 35 降到 **34**。系统不再强制 edge-to-edge，窗口按传统方式让出状态栏，输入与绘制
+重新对齐。本移植要用的前台服务类型（`specialUse` / `mediaProjection`）在 API 34
+就已可用，不依赖 35。
+
+> 备选方案（保留 targetSdk 35）：在清单的 `<application>` 上加
+> `android:windowOptOutEdgeToEdgeEnforcement="true"`。但它只是 Android 15 的过渡
+> 开关，Android 16 起失效，所以没采用。
+
+---
+
 ## 待办清单
 
 见下方"移植待办"一节（本文件末尾）。原审查的完整清单在 fork 创建时的会话记录里，

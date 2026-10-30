@@ -182,6 +182,19 @@ set_target_properties(
     QT_ANDROID_VERSION_NAME "0.1.0"
     QT_ANDROID_VERSION_CODE 1
     QT_ANDROID_COMPILE_SDK_VERSION 35
-    QT_ANDROID_TARGET_SDK_VERSION 35
+    # targetSdk 必须是 34，不能是 35。
+    #
+    # Android 15 对 targetSdk >= 35 的应用**强制 edge-to-edge**（窗口属性里会出现
+    # EDGE_TO_EDGE_ENFORCED）：应用画到状态栏下面，内容从 y=0 开始。而 Qt 6.7.3
+    # 不支持 edge-to-edge，它仍按"内容在状态栏下方"换算输入坐标，于是所有触摸都被
+    # 加上一个状态栏高度的垂直偏移（本机实测 111 px）。
+    #
+    # 症状就是"界面显示正常、但大部分控件点不中"——预览区面积大所以拖动还能用，
+    # 小按钮一偏就落空。原作者用 Qt 6.9.3（支持 edge-to-edge）所以没撞上。
+    #
+    # 降到 34 后系统不再强制 edge-to-edge，窗口按传统方式让出状态栏，输入与绘制
+    # 重新对齐。本移植需要的前台服务类型（specialUse / mediaProjection）在 API 34
+    # 就已可用，不依赖 35。
+    QT_ANDROID_TARGET_SDK_VERSION 34
     QT_ANDROID_MIN_SDK_VERSION 29)
 
