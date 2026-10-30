@@ -20,7 +20,12 @@ name: Android compile check
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    # main = 正式分支；test/** = 试验分支。
+    # 试验分支也要自动构建：不然每次都要手动 workflow_dispatch，很容易忘，
+    # 而且"推上去以为在构建、实际什么都没发生"已经坑过一次（见下面 paths 的注释）。
+    branches:
+      - main
+      - 'test/**'
     paths:
       - 'cmake/android/**'
       - 'libobs/**'
