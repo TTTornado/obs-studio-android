@@ -48,6 +48,7 @@
 #include "widgets/OBSAndroidDisplay.hpp" // 3-3 模态遮挡：obsAndroidDisplaySetVisible
 #include "widgets/OBSAndroidPath.hpp" // 3-4：openUrl(本地路径) 的 Android 替代
 #include <QAbstractScrollArea> // 3-4 触摸：长按坐标要按 viewport 系给（itemAt/exec 都吃这个系）
+#include <QAbstractItemView> // 单指滑动：item view 要换 LeftMouseButtonGesture（见 enableFlickScroll）
 #include <QComboBox> // P-8 触摸：组合框弹层探针要认出按下落在的是不是 QComboBox
 #include <QContextMenuEvent> // 3-4 触摸：长按合成右键
 #include <QGestureEvent> // P-8 探针：认出 TapAndHold 手势
@@ -55,7 +56,6 @@
 #include <QTimer>
 #include <QScreen> // B 方案：顶层对话框压进 availableGeometry 时要完整类型
 #include <QScroller> // 单指滑动滚动（QScroller）
-#include <QLayout> // clamp 里要 layout()->activate() / minimumSize() 重算
 #endif
 
 #include <chrono>
@@ -1050,74 +1050,45 @@ static void clampTopLevelToScreen(QWidget *w)
 	w->resize(target);
 	QSize after = w->size(); // resize 可能被最小尺寸挡住，这里取实际值
 
-	/* 第一次压不下去，说明对话框的最小高度大于屏幕可用高。实测「添加源」时踩过三层，
-	 * 记录在这里免得以后再摸一遍：
+	/* resize 被挡住，说明这个对话框还带着"桌面尺寸假设"（.ui 里写死的 minimumSize
+	 * 或某个子控件的 minimumHeight），需要在它的构造函数里放宽 —— 见
+	 * OBSBasicSourceSelect / OBSBasicSettings 的 #ifdef __ANDROID__ 块。
 	 *
-	 * ① .ui 里写死 minimumHeight（OBSBasicSourceSelect.ui 的 sourceTypeList 是 460）；
-	 * ② 布局在首次 show 时把**窗口自己的 minimumSize** 设成布局最小尺寸
-	 *    （QLayout 默认 SetDefaultConstraint），QWidget::resize() 被它夹住 ——
-	 *    光改子控件，窗口尺寸一点不动（实测：日志说"放宽 1 个"，尺寸仍停在 478）；
-	 * ③ QLayout 算最小尺寸走 qSmartMinSize()（widgets/kernel/qlayoutengine.cpp:321-333）：
-	 *    sizePolicy 没有 ShrinkFlag 时取 max(sizeHint, minimumSizeHint)，sizeHint 按内容算。
-	 *
-	 * 现在只做 ② 的对策（清窗口最小尺寸 + SetNoConstraint），**不动任何子控件**。
-	 * 依据：设置对话框实测「80 个滚动区里只放宽了 1 个，尺寸照样从 512 压到 377」
-	 * ⇒ 起作用的应该是这两步，而不是放宽子控件。本次改动就是在验证这一点。
-	 *
-	 * 判据看 CLAMP-FIT 行里的「布局最小高」：它大于目标高度就说明内容装不下、会被裁
-	 * （底部按钮可能跑出可视区）。设置对话框有 per-page QScrollArea 兜底；
-	 * 「添加源」没有 —— 若那里报 layoutMinH > 目标高，就说明必须额外处理。 */
-	if (after.height() > target.height()) {
-		/* 谁最占高度：按 minimumSizeHint 取前 5 名打出来。万一这次还是压不下去，
-		 * 这五行能直接指出下一个该松手的控件，不用再猜。 */
-		int topH[5] = {0, 0, 0, 0, 0};
-		QString topD[5];
+	 * 踩过的三层留档，免得以后再摸一遍：
+	 *   ① .ui 里写死 minimumHeight（添加源的 sourceTypeList 是 460）；
+	 *   ② 布局首次 show 时把窗口自己的 minimumSize 设成布局最小尺寸
+	 *      （QLayout 默认 SetDefaultConstraint），QWidget::resize() 被它夹住；
+	 *   ③ QLayout 算最小尺寸走 qSmartMinSize()（qlayoutengine.cpp:321-333）：
+	 *      sizePolicy 没有 ShrinkFlag 时取 max(sizeHint, minimumSizeHint)。
+	 * ②③ 都能用"在源码里放宽最小尺寸"绕开，不需要去碰这些机制。 */
+	if (after != target) {
+		/* 诊断：找出最占高度的那个子控件，够定位了（不再排前 5 名）。 */
+		QString worst;
+		int worstH = 0;
 		for (QWidget *c : w->findChildren<QWidget *>()) {
 			const int h = c->minimumSizeHint().height();
-			if (h <= 0)
-				continue;
-			const QString d = QStringLiteral("%1/%2 minH=%3 sizeHint=%4")
-						  .arg(QString::fromLatin1(c->metaObject()->className()),
-						       c->objectName())
-						  .arg(c->minimumHeight())
-						  .arg(c->sizeHint().height());
-			for (int k = 0; k < 5; ++k) {
-				if (h > topH[k]) {
-					for (int m = 4; m > k; --m) {
-						topH[m] = topH[m - 1];
-						topD[m] = topD[m - 1];
-					}
-					topH[k] = h;
-					topD[k] = d;
-					break;
-				}
+			if (h > worstH) {
+				worstH = h;
+				worst = QStringLiteral("%1/%2 minH=%3 sizeHint=%4")
+						.arg(QString::fromLatin1(c->metaObject()->className()),
+						     c->objectName())
+						.arg(c->minimumHeight())
+						.arg(c->sizeHint().height());
 			}
 		}
-		for (int k = 0; k < 5; ++k) {
-			if (topH[k] > 0)
-				obsAndroidDisplayLog("CLAMP-BIG %d. minHint=%d  %s", k + 1, topH[k],
-						     topD[k].toUtf8().constData());
-		}
 
-		const QSize oldMin = w->minimumSize();
-		w->setMinimumSize(QSize(0, 0));
-		int layoutMinH = -1;
-		if (QLayout *lay = w->layout()) {
-			/* 默认的 SetDefaultConstraint 会在 activate() 时把布局最小尺寸再推回
-			 * 窗口身上（实测 643x478 -> 643x478，白清）。关掉这条约束才解得开。 */
-			lay->setSizeConstraint(QLayout::SetNoConstraint);
-			lay->activate();
-			layoutMinH = lay->minimumSize().height();
-		}
-
-		w->resize(target);
-		after = w->size();
+		/* 这里**故意不再硬压**。以前用 setMinimumSize(0,0)+SetNoConstraint 把窗口
+		 * 强行缩到目标尺寸，会造出"窗口比内容小"的不一致状态：布局仍按原来的最小
+		 * 尺寸摆放子控件，控件被裁在窗口外 —— 实测把添加源列表的滚动和命中判定都
+		 * 搞坏了（列表 viewport 比可视区大，滚动条范围算错）。
+		 *
+		 * 正确做法是在对话框自己的构造函数里放宽最小尺寸，参考
+		 * OBSBasicSourceSelect / OBSBasicSettings 里的 #ifdef __ANDROID__ 块。
+		 * 下面这行就是待办清单：出现了就说明该对话框还没做源码级修复。 */
 		obsAndroidDisplayLog(
-			"CLAMP-FIT %s：窗口最小尺寸 %dx%d -> %dx%d，布局最小高 %d，结果 %dx%d（目标高 %d）%s",
-			w->metaObject()->className(), oldMin.width(), oldMin.height(),
-			w->minimumSize().width(), w->minimumSize().height(), layoutMinH, after.width(),
-			after.height(), target.height(),
-			layoutMinH > target.height() ? "  <<< 内容装不下，可能被裁" : "");
+			"CLAMP-BLOCKED %s：目标 %dx%d 实际 %dx%d；最占高度=%s —— 该对话框需要在源码里放宽最小尺寸",
+			w->metaObject()->className(), target.width(), target.height(), after.width(),
+			after.height(), worst.toUtf8().constData());
 	}
 
 	/* 装不下时别居中：居中会算出负的 y，标题栏跑出屏外、底部依旧点不到。
@@ -1165,16 +1136,36 @@ static void enableFlickScroll(QWidget *w)
 
 	const QList<QAbstractScrollArea *> areas = w->findChildren<QAbstractScrollArea *>();
 	int grabbed = 0;
+	int itemViews = 0;
 	for (QAbstractScrollArea *area : areas) {
 		QWidget *vp = area->viewport();
 		if (!vp || QScroller::hasScroller(vp))
 			continue; // 没有 viewport 或已经抓过，别重复挂
-		QScroller::grabGesture(vp, QScroller::TouchGesture);
+
+		/* 手势模式必须按控件类型分开，实测两种都对不上是行不通的：
+		 *
+		 * QAbstractItemView（QListWidget/QTreeView…）用 TouchGesture **不生效**：
+		 * 它自己处理触摸，识别器抢不到，事件退回成"按住左键拖选"。在添加源的源列表上
+		 * 表现就是"列表不滚、手指滑过哪项就把哪项点开"——因为
+		 * OBSBasicSourceSelect 把 currentItemChanged 接到了 sourceTypeSelected，
+		 * 拖选改一次当前项，右边面板就换一次。
+		 *
+		 * 对这类控件改用 LeftMouseButtonGesture：QScroller 会抓走鼠标并消费移动事件，
+		 * 拖动变成滚动，视图收不到那些移动。代价是按下那一项仍会被选中一次
+		 * （按下先到控件），但那比"依次点开所有项"好得多。
+		 *
+		 * QScrollArea（设置页那种）继续用 TouchGesture —— 那边实测工作正常，
+		 * 而且不会出现"按下先选中"。 */
+		const bool isItemView = qobject_cast<QAbstractItemView *>(area) != nullptr;
+		QScroller::grabGesture(vp, isItemView ? QScroller::LeftMouseButtonGesture
+						      : QScroller::TouchGesture);
 		++grabbed;
+		if (isItemView)
+			++itemViews;
 	}
 
-	obsAndroidDisplayLog("FLICK %s：滚动区 %d 个，本次开 %d 个", w->metaObject()->className(),
-			     int(areas.size()), grabbed);
+	obsAndroidDisplayLog("FLICK %s：滚动区 %d 个，本次开 %d 个（其中 item view %d 个用鼠标手势）",
+			     w->metaObject()->className(), int(areas.size()), grabbed, itemViews);
 }
 
 class AndroidInputFilter : public QObject {
