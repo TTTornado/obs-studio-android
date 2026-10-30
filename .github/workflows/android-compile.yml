@@ -26,10 +26,11 @@ on:
       - 'libobs/**'
       - 'libobs-opengl/**'
       - 'plugins/**'
-      - 'frontend/cmake/**'
-      - 'frontend/plugin-manager/**'
-      - 'frontend/utility/**'
-      - 'frontend/widgets/OBSAndroid*'
+      # 整个前端都算：APK 里就是它，而 Android 适配的主战场（OBSApp.cpp 的
+      # AndroidInputFilter、各对话框的尺寸适配、QScroller 等）都在 frontend/ 下。
+      # 之前按子目录白名单过滤，结果改 OBSApp.cpp 时一个 run 都没触发 —— 静默不构建
+      # 比多跑几次更坑。缓存命中后一次约 10 分钟，成本可接受。
+      - 'frontend/**'
       - 'android/**'
       - '.github/workflows/android-compile.yml'
   pull_request:
@@ -38,6 +39,7 @@ on:
       - 'libobs/**'
       - 'libobs-opengl/**'
       - 'plugins/**'
+      - 'frontend/**'
       - 'android/**'
       - '.github/workflows/android-compile.yml'
 
